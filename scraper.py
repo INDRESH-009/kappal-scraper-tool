@@ -1,0 +1,2016 @@
+"""
+kappal_scraper.py
+─────────────────
+Playwright-based async scraper for digital.kappal.co
+Returns all rate cards (with full charge breakdowns) as structured JSON.
+"""
+
+import asyncio
+import json
+import re
+from datetime import datetime
+from pathlib import Path
+from typing import Optional, Callable, Any
+
+from playwright.async_api import async_playwright, Page, Locator, ElementHandle
+
+# ─── Constants ────────────────────────────────────────────────────────────────
+
+BASE_URL      = "https://digital.kappal.co"
+LOGIN_URL     = f"{BASE_URL}/login"
+RATES_URL     = f"{BASE_URL}/rates"
+AUTH_PROFILE_DIR = Path(__file__).parent / ".kappal-auth-profile"
+PORT_QUERY_FALLBACKS = {
+    "chennai": ["INMAA"],
+    "new york": ["USNYC"],
+    "nhava": ["INNSA"],
+    "jawaharlal nehru": ["INNSA"],
+    "mumbai": ["INNSA"],
+}
+
+
+async def authenticate_kappal(
+    progress_cb: Optional[Callable[[str], Any]] = None,
+    headless: bool = False,
+    auth_timeout: int = 300,
+) -> dict:
+    """
+    Opens Kappal's real login page in a persistent browser profile.
+    The user enters credentials and solves CAPTCHA directly on Kappal.
+    Cookies/session state are kept for later scrape runs.
+    """
+
+    async def emit(msg: str):
+        if progress_cb:
+            await progress_cb(msg)
+
+    async with async_playwright() as pw:
+        ctx = await _launch_context(pw, headless=headless)
+        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+
+        try:
+            await emit("🔐 Opening Kappal login page in a browser window ...")
+            await page.goto(LOGIN_URL, wait_until="domcontentloaded")
+            await page.wait_for_load_state("networkidle")
+            await _wait_for_login(page, auth_timeout, emit)
+            await emit("✅ Authentication saved. You can run the scraper now.")
+            return {"authenticated": True, "profile_dir": str(AUTH_PROFILE_DIR)}
+        finally:
+            await ctx.close()
+
+
+async def manual_search_and_scrape_kappal(
+    progress_cb: Optional[Callable[[str], Any]] = None,
+    headless: bool = False,
+    search_timeout: int = 600,
+) -> dict:
+    """
+    Opens Kappal in a real browser and lets the user perform the search manually.
+    Once result cards appear, the scraper extracts all visible rate details.
+    """
+
+    async def emit(msg: str):
+        if progress_cb:
+            await progress_cb(msg)
+
+    async with async_playwright() as pw:
+        ctx = await _launch_context(pw, headless=headless)
+        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+
+        async def snap(name: str):
+            try:
+                path = f"debug_{name}.png"
+                await page.screenshot(path=path, full_page=False)
+                await emit(f"📸 Screenshot saved → {path}")
+            except Exception:
+                pass
+
+        try:
+            await emit("🌐 Opening Kappal rate search page ...")
+            await page.goto(RATES_URL, wait_until="domcontentloaded")
+            await page.wait_for_load_state("networkidle")
+
+            if "login" in page.url:
+                await emit("🔐 Please log in on Kappal, solve CAPTCHA, then continue to Rate Search.")
+            else:
+                await emit("✅ Existing login detected.")
+
+            await emit(
+                "🧭 Fill the search form on Kappal and click Search Rates. "
+                f"I will wait up to {search_timeout}s for results, then scrape automatically."
+            )
+
+            result_target = await _wait_for_results_in_context(ctx, page, search_timeout, emit)
+            await snap("manual_results")
+
+            count = await _get_result_count(result_target)
+            await emit(f"📦 {count} rate card(s) visible now – scraping as more load ...")
+            results = await _scrape_cards_as_they_load(result_target, emit)
+
+            return {
+                "search_params": {"mode": "manual_site_search", "source_url": result_target.url},
+                "total_results": len(results),
+                "scraped_at": datetime.utcnow().isoformat() + "Z",
+                "results": results,
+            }
+
+        except Exception as exc:
+            try:
+                await page.screenshot(path="debug_ERROR.png")
+                await emit("📸 Error screenshot → debug_ERROR.png")
+                await emit(f"   URL at failure: {page.url}")
+            except Exception:
+                pass
+            raise RuntimeError(f"Manual scrape failed: {exc}") from exc
+
+        finally:
+            await ctx.close()
+
+# ─── Public entry point ───────────────────────────────────────────────────────
+
+async def scrape_kappal(
+    origin_query: str,       # e.g. "Chennai" or "INMAA"
+    destination_query: str,  # e.g. "New York" or "USNYC"
+    cut_off_date: str,       # e.g. "23 May 2026"
+    load_type: str  = "20GP",
+    quantity: int   = 1,
+    origin_service_mode: str = "CY",
+    destination_service_mode: str = "CY",
+    origin_carrier_sd: bool = False,
+    destination_carrier_sd: bool = False,
+    include_nearby_origin: bool = False,
+    include_nearby_destination: bool = False,
+    charges: str = "Freight, Origin, Destination +1",
+    search_reference_name: str = "",
+    search_currency: str = "USD",
+    progress_cb: Optional[Callable[[str], Any]] = None,
+    headless: bool  = False,
+) -> dict:
+    """
+    Main entry point.  Returns:
+    {
+      search_params: {...},
+      total_results: N,
+      scraped_at: ISO-string,
+      results: [ {route, carrier, charges, remarks, ...}, ... ]
+    }
+    progress_cb(msg) is called with human-readable status strings.
+    """
+
+    async def emit(msg: str):
+        if progress_cb:
+            await progress_cb(msg)
+
+    async with async_playwright() as pw:
+        ctx = await _launch_context(pw, headless=headless)
+        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+
+        # Intercept API responses for faster/more reliable data capture
+        captured_rates: list = []
+        async def handle_response(response):
+            if "/rates" in response.url and response.status == 200:
+                try:
+                    body = await response.json()
+                    if isinstance(body, dict) and "data" in body:
+                        captured_rates.extend(body["data"] if isinstance(body["data"], list) else [])
+                except Exception:
+                    pass
+        page.on("response", handle_response)
+
+        async def snap(name: str):
+            """Save a debug screenshot."""
+            try:
+                path = f"debug_{name}.png"
+                await page.screenshot(path=path, full_page=False)
+                await emit(f"📸 Screenshot saved → {path}")
+            except Exception:
+                pass
+
+        try:
+            await emit("🔍 Navigating to rate search page …")
+            await page.goto(RATES_URL, wait_until="networkidle")
+            await asyncio.sleep(1)
+            if "login" in page.url:
+                raise RuntimeError(
+                    "Not authenticated yet. Click Authenticate first, log in on Kappal, "
+                    "then run the scraper again."
+                )
+
+            await snap("02_rates_page")
+            await emit(f"   URL: {page.url}")
+
+            await emit("🔍 Filling search form …")
+            await _fill_search_form(page, origin_query, destination_query,
+                                    cut_off_date, load_type, quantity,
+                                    origin_service_mode, destination_service_mode,
+                                    origin_carrier_sd, destination_carrier_sd,
+                                    include_nearby_origin, include_nearby_destination,
+                                    charges, search_reference_name, search_currency,
+                                    emit=emit, snap=snap)
+
+            await emit("⏳ Waiting for results …")
+            await _wait_for_results(page)
+            await snap("05_results")
+
+            count = await _get_result_count(page)
+            await emit(f"📦 {count} rate(s) found – opening each card …")
+
+            results = await _scrape_all_cards(page, count, emit)
+
+            return {
+                "search_params": {
+                    "origin":        origin_query,
+                    "destination":   destination_query,
+                    "cut_off_date":  cut_off_date,
+                    "load_type":     load_type,
+                    "quantity":      quantity,
+                    "origin_service_mode": origin_service_mode,
+                    "destination_service_mode": destination_service_mode,
+                    "origin_carrier_sd": origin_carrier_sd,
+                    "destination_carrier_sd": destination_carrier_sd,
+                    "include_nearby_origin": include_nearby_origin,
+                    "include_nearby_destination": include_nearby_destination,
+                    "charges": charges,
+                    "search_reference_name": search_reference_name,
+                    "search_currency": search_currency,
+                },
+                "total_results": len(results),
+                "scraped_at":    datetime.utcnow().isoformat() + "Z",
+                "results":       results,
+            }
+
+        except Exception as exc:
+            try:
+                await page.screenshot(path="debug_ERROR.png")
+                await emit(f"📸 Error screenshot → debug_ERROR.png  (open it to see what went wrong)")
+                await emit(f"   URL at failure: {page.url}")
+            except Exception:
+                pass
+            raise RuntimeError(f"Scraping failed: {exc}") from exc
+
+        finally:
+            await ctx.close()
+
+
+# ─── Login ────────────────────────────────────────────────────────────────────
+
+async def _launch_context(pw, headless: bool = False):
+    return await pw.chromium.launch_persistent_context(
+        str(AUTH_PROFILE_DIR),
+        headless=headless,
+        slow_mo=80 if not headless else 0,
+        viewport={"width": 1440, "height": 900},
+    )
+
+
+async def _wait_for_login(page: Page, auth_timeout: int = 300, emit=None):
+    if emit:
+        await emit(
+            f"⏸  Enter your credentials on Kappal, solve CAPTCHA, and click Login. "
+            f"Waiting up to {auth_timeout}s ..."
+        )
+
+    deadline = asyncio.get_event_loop().time() + auth_timeout
+    while asyncio.get_event_loop().time() < deadline:
+        if "login" not in page.url:
+            break
+        await asyncio.sleep(1)
+    else:
+        raise RuntimeError(
+            f"Authentication was not completed within {auth_timeout} seconds. "
+            "Please try again or increase the auth timeout."
+        )
+
+    if emit:
+        await emit("✅ Login detected.")
+
+    await page.wait_for_load_state("networkidle")
+
+
+# ─── Search form ──────────────────────────────────────────────────────────────
+
+async def _fill_search_form(
+    page: Page, origin: str, destination: str,
+    cut_off_date: str, load_type: str, quantity: int,
+    origin_service_mode: str, destination_service_mode: str,
+    origin_carrier_sd: bool, destination_carrier_sd: bool,
+    include_nearby_origin: bool, include_nearby_destination: bool,
+    charges: str, search_reference_name: str, search_currency: str,
+    emit=None, snap=None,
+):
+    async def log(msg):
+        if emit: await emit(msg)
+
+    # ── Save full form HTML for diagnosis ────────────────────────────────────
+    try:
+        form_html = await page.evaluate("""
+            () => {
+                // Find the main form/search area
+                const containers = ['form', '[class*="search"]', '[class*="rate"]', 'main', 'body'];
+                for (const sel of containers) {
+                    const el = document.querySelector(sel);
+                    if (el) return el.innerHTML.slice(0, 8000);
+                }
+                return document.body.innerHTML.slice(0, 8000);
+            }
+        """)
+        with open("debug_form_html.txt", "w") as f:
+            f.write(form_html)
+        await log("📄 Form HTML saved → debug_form_html.txt (open to inspect DOM)")
+    except Exception as e:
+        await log(f"   Could not save HTML: {e}")
+
+    # ── Dump all clickable elements that look like port fields ────────────────
+    clickables = await page.evaluate("""
+        () => {
+            const all = document.querySelectorAll('div, span, input');
+            return Array.from(all)
+                .filter(el => {
+                    const t = el.innerText || el.value || el.placeholder || '';
+                    const visible = el.offsetParent !== null && el.offsetWidth > 50;
+                    return visible && (
+                        t.toLowerCase().includes('origin') ||
+                        t.toLowerCase().includes('destination') ||
+                        t.toLowerCase().includes('port') ||
+                        t.toLowerCase().includes('nhava') ||
+                        t.toLowerCase().includes('chennai') ||
+                        t.toLowerCase().includes('new york') ||
+                        el.tagName === 'INPUT'
+                    );
+                })
+                .slice(0, 30)
+                .map(el => ({
+                    tag: el.tagName,
+                    text: (el.innerText || el.value || el.placeholder || '').slice(0,60),
+                    className: el.className.slice(0,80),
+                    id: el.id,
+                }));
+        }
+    """)
+    await log("🔬 Clickable port-like elements found:")
+    for c in clickables:
+        await log(f"   <{c['tag'].lower()} class='{c['className'][:60]}' id='{c['id']}'> '{c['text']}'")
+
+    # ── Origin ────────────────────────────────────────────────────────────────
+    await _set_service_mode(page, "origin", origin_service_mode, emit)
+    await _set_section_checkbox(page, "origin", "Carrier SD Services", origin_carrier_sd, emit)
+    await _set_section_checkbox(page, "origin", "Include Nearby", include_nearby_origin, emit)
+    await log(f"✏️  Filling origin: '{origin}' …")
+    if not await _kappal_port_fill(page, section="origin", query=origin, emit=emit):
+        raise RuntimeError(
+            f"Origin port '{origin}' was not found. Try entering the exact Kappal port code, "
+            "for example INMAA or INNSA."
+        )
+    if snap: await snap("03a_origin_filled")
+    await asyncio.sleep(0.5)
+
+    # ── Destination ───────────────────────────────────────────────────────────
+    await _set_service_mode(page, "destination", destination_service_mode, emit)
+    await _set_section_checkbox(page, "destination", "Carrier SD Services", destination_carrier_sd, emit)
+    await _set_section_checkbox(page, "destination", "Include Nearby", include_nearby_destination, emit)
+    await log(f"✏️  Filling destination: '{destination}' …")
+    if not await _kappal_port_fill(page, section="destination", query=destination, emit=emit):
+        raise RuntimeError(
+            f"Destination port '{destination}' was not found. Try entering the exact Kappal port code, "
+            "for example USNYC."
+        )
+    if snap: await snap("03b_dest_filled")
+    await asyncio.sleep(0.5)
+
+    # ── Date ─────────────────────────────────────────────────────────────────
+    await log(f"📅  Setting date: '{cut_off_date}' …")
+    await _fill_date(page, cut_off_date, emit)
+    if snap: await snap("03c_date_filled")
+
+    # ── Load type ─────────────────────────────────────────────────────────────
+    await log(f"📦  Setting load type: '{load_type} x{quantity}' …")
+    await _fill_load_type(page, load_type, quantity, emit)
+    if snap: await snap("03d_loadtype_filled")
+    await asyncio.sleep(0.3)
+
+    await _fill_charges(page, charges, emit)
+    await _fill_reference_name(page, search_reference_name, emit)
+    await _fill_currency(page, search_currency, emit)
+
+    # ── Dump all visible buttons before clicking ──────────────────────────────
+    btns_info = await page.evaluate("""
+        () => Array.from(document.querySelectorAll('button'))
+            .filter(b => b.offsetParent !== null)
+            .map(b => ({text: b.innerText.trim().slice(0,40), cls: b.className.slice(0,60)}))
+    """)
+    await log(f"🔎  Visible buttons: {[b['text'] for b in btns_info]}")
+
+    # ── Click Search Rates ────────────────────────────────────────────────────
+    clicked = False
+    for btn_text in ["Search Rates", "Search", "Find Rates", "Go"]:
+        btn = page.locator(f"button:has-text('{btn_text}')").last
+        if await btn.count() > 0 and await btn.is_visible():
+            await btn.scroll_into_view_if_needed()
+            await btn.click()
+            await log(f"   ✅ Clicked button: '{btn_text}'")
+            clicked = True
+            break
+
+    if not clicked:
+        await log("   ⚠️  Search button not found by text — trying submit type")
+        submit = page.locator("button[type='submit'], input[type='submit']").last
+        if await submit.count() > 0:
+            await submit.click()
+            clicked = True
+
+    if not clicked:
+        await log("   ❌ Could not find Search Rates button — check debug_form_html.txt")
+
+    await asyncio.sleep(2)
+    await page.wait_for_load_state("networkidle")
+    await log(f"   URL after search click: {page.url}")
+    if snap: await snap("04_after_search_click")
+
+
+async def _kappal_port_fill(page: Page, section: str, query: str, emit=None) -> bool:
+    """
+    Fills the Origin or Destination port autocomplete on Kappal.
+
+    Kappal renders port fields as styled containers (div/span with anchor icon).
+    Clicking the container opens a search overlay with an actual <input> inside.
+    This function:
+      1. Finds and clicks the correct container (origin or destination)
+      2. Waits for the search input to appear in the overlay
+      3. Types the query and clicks the first suggestion
+    """
+    async def log(m):
+        if emit: await emit(m)
+
+    # Prefer the real Angular Material autocomplete inputs. Broad container
+    # clicks can leave the suggestions panel intercepting the next click.
+    direct_selectors = (
+        [
+            "input[name='fcl_origin_port']:visible",
+            "input#originLocation:visible",
+            "md-input-container[md-input-id='originLocation'] input:visible",
+            "input[aria-owns='ul-6']:visible",
+        ]
+        if section == "origin"
+        else [
+            "input[name='fcl_destination_port']:visible",
+            "input#destinationLocation:visible",
+            "md-input-container[md-input-id='destinationLocation'] input:visible",
+            "input[id*='destination' i]:visible",
+        ]
+    )
+
+    for sel in direct_selectors:
+        inp = page.locator(sel).first
+        if await inp.count() > 0 and await inp.is_visible():
+            await log(f"   Found {section} input via: {sel}")
+            return await _type_port_and_pick(page, inp, query, emit)
+
+    # Step 1: Click the right container to open the search overlay.
+    # We use broad selectors and pick the one matching origin or destination
+    # context only when direct input lookup fails.
+
+    container_clicked = False
+
+    # Strategy A: find container by aria-label or data attributes
+    for attr_sel in [
+        f"[aria-label*='{section}' i]",
+        f"[data-field*='{section}' i]",
+        f"[placeholder*='{section}' i]",
+        f"[class*='{section}']:visible",
+    ]:
+        el = page.locator(attr_sel).first
+        if await el.count() > 0 and await el.is_visible():
+            await el.click(force=True)
+            await log(f"   Clicked container via: {attr_sel}")
+            container_clicked = True
+            break
+
+    # Strategy B: The form has two identical-looking port selector areas.
+    # Origin is on the LEFT side (first), Destination on the RIGHT (second).
+    # Find all anchor-icon port containers and pick index 0 or 1.
+    if not container_clicked:
+        # Look for the styled field that shows port names (has anchor ⚓ icon next to it)
+        port_containers = page.locator(
+            # Common patterns for these custom port picker components
+            "[class*='port']:visible, "
+            "[class*='Port']:visible, "
+            "[class*='location']:visible, "
+            "[class*='Location']:visible, "
+            "[class*='search-field']:visible, "
+            # Containers that have an svg/icon + text pattern
+            "div:has(svg):has-text('INNSA'):visible, "
+            "div:has(svg):has-text('USNYC'):visible, "
+            "div:has(svg):has-text('Nhava'):visible, "
+            "div:has(svg):has-text('New York'):visible"
+        )
+        idx = 0 if section == "origin" else 1
+        c = await port_containers.count()
+        await log(f"   Found {c} port containers for section='{section}' (want index {idx})")
+        if c > idx:
+            await port_containers.nth(idx).click(force=True)
+            container_clicked = True
+            await log(f"   Clicked port container #{idx}")
+
+    # Strategy C: two halves of the form — click left or right side
+    if not container_clicked:
+        await log(f"   Trying positional click strategy for '{section}' …")
+        # Evaluate JS to find and click the container by position
+        result = await page.evaluate(f"""
+            (section) => {{
+                // Find all divs/spans that have the anchor SVG icon pattern
+                // Kappal port fields typically have class containing 'input' or 'field'
+                const candidates = Array.from(document.querySelectorAll(
+                    'div, span, input'
+                )).filter(el => {{
+                    const rect = el.getBoundingClientRect();
+                    const visible = rect.width > 100 && rect.height > 20 && rect.top > 0;
+                    const hasPortText = el.innerText && (
+                        el.innerText.includes('INNSA') ||
+                        el.innerText.includes('USNYC') ||
+                        el.innerText.includes('INMAA') ||
+                        el.innerText.includes('Nhava') ||
+                        el.innerText.includes('Chennai') ||
+                        el.innerText.includes('New York') ||
+                        el.innerText.includes('Sheva')
+                    );
+                    return visible && hasPortText && rect.width < 700;
+                }});
+
+                if (candidates.length === 0) return {{found: false, count: 0}};
+
+                // Sort by left position — origin is leftmost
+                candidates.sort((a,b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
+                const idx = section === 'origin' ? 0 : candidates.length - 1;
+                const el = candidates[idx];
+                const rect = el.getBoundingClientRect();
+                el.click();
+                return {{
+                    found: true,
+                    count: candidates.length,
+                    clicked: el.tagName + ' ' + el.className.slice(0,60),
+                    text: (el.innerText || '').slice(0, 50),
+                    left: rect.left,
+                }};
+            }}
+        """, section)
+        await log(f"   JS click result: {result}")
+        if result.get('found'):
+            container_clicked = True
+
+    if not container_clicked:
+        await log(f"   ⚠️  Could not find {section} container. Check debug_form_html.txt")
+        return False
+
+    # Step 2: Wait for overlay / search input to appear
+    await asyncio.sleep(0.6)
+
+    overlay_input = None
+    overlay_selectors = [
+        # Common overlay/modal input patterns
+        "[role='dialog'] input:visible",
+        "[role='combobox']:visible",
+        "[class*='overlay'] input:visible",
+        "[class*='modal'] input:visible",
+        "[class*='popup'] input:visible",
+        "[class*='dropdown'] input:visible",
+        "[class*='search'] input:visible",
+        # Generic: any newly visible input with relevant placeholder
+        "input[placeholder*='search' i]:visible",
+        "input[placeholder*='port' i]:visible",
+        "input[placeholder*='type' i]:visible",
+        "input[autofocus]:visible",
+    ]
+
+    for sel in overlay_selectors:
+        inp = page.locator(sel)
+        if await inp.count() > 0:
+            if await inp.first.is_visible():
+                overlay_input = inp.first
+                await log(f"   Found overlay input via: {sel}")
+                break
+
+    # Fallback: any focused input that appeared after the click
+    if overlay_input is None:
+        await log("   Trying any focused / newly visible input …")
+        all_visible = page.locator("input:visible")
+        c = await all_visible.count()
+        await log(f"   Total visible inputs after click: {c}")
+        for i in range(c):
+            inp = all_visible.nth(i)
+            ph = await inp.get_attribute("placeholder") or ""
+            cls = await inp.get_attribute("class") or ""
+            await log(f"      input[{i}] placeholder='{ph}' class='{cls[:60]}'")
+        if c > 0:
+            overlay_input = all_visible.first
+            await log(f"   Falling back to first visible input")
+
+    if overlay_input is None:
+        await log(f"   ❌ No input appeared after clicking {section} container")
+        return False
+
+    return await _type_port_and_pick(page, overlay_input, query, emit)
+
+
+async def _type_port_and_pick(page: Page, input_locator: Locator, query: str, emit=None) -> bool:
+    async def log(m):
+        if emit: await emit(m)
+
+    queries = [query]
+    normalized = query.strip().lower()
+    queries.extend(PORT_QUERY_FALLBACKS.get(normalized, []))
+
+    suggestion_selectors = [
+        "[role='option']:visible",
+        "md-autocomplete-parent-scope:visible",
+        "md-virtual-repeat-container li:visible",
+        "[class*='suggestion']:visible",
+        "[class*='option']:visible",
+        "[class*='result']:visible",
+        "li:visible",
+        "[role='listbox'] div:visible",
+    ]
+
+    for attempt in queries:
+        # Fill without pointer-clicking the input; Kappal's md-autocomplete panel can
+        # cover the field and intercept pointer events.
+        await input_locator.focus()
+        await input_locator.fill("")
+        await input_locator.type(attempt, delay=80)
+        await _wait_for_app_idle(page, timeout=12_000)
+        await asyncio.sleep(0.8)
+
+        for sel in suggestion_selectors:
+            suggestions = page.locator(sel)
+            c = await suggestions.count()
+            if c == 0:
+                continue
+
+            chosen = None
+            not_found_seen = False
+            for i in range(min(c, 8)):
+                candidate = suggestions.nth(i)
+                text = (await candidate.inner_text()).strip()
+                if not text:
+                    continue
+                if "no ports matching" in text.lower() or "no results" in text.lower():
+                    not_found_seen = True
+                    continue
+                if attempt.lower() in text.lower() or query.lower() in text.lower():
+                    chosen = candidate
+                    break
+                if chosen is None:
+                    chosen = candidate
+
+            if chosen is not None and await chosen.is_visible():
+                text = (await chosen.inner_text()).strip()
+                await log(f"   ✅ Selecting port suggestion: '{text[:60]}' (via {sel})")
+                await chosen.click(force=True)
+                await _wait_for_app_idle(page, timeout=12_000)
+                await asyncio.sleep(0.4)
+                return True
+
+            if not_found_seen:
+                await log(f"   ⚠️  No port match for '{attempt}'")
+                break
+
+    await page.keyboard.press("Escape")
+    await log(f"   ❌ Kappal did not return a selectable port for '{query}'")
+    return False
+
+
+async def _set_service_mode(page: Page, section: str, mode: str, emit=None):
+    async def log(m):
+        if emit: await emit(m)
+
+    mode = (mode or "CY").upper()
+    if mode not in {"CY", "DOOR"}:
+        await log(f"   ⚠️  Unsupported {section} service mode '{mode}', keeping current")
+        return
+
+    changed = await page.evaluate(
+        """
+        ({section, mode}) => {
+            const blocks = Array.from(document.querySelectorAll('.mobile_input, .search_multiport_div'));
+            const block = blocks.find(el => (el.innerText || '').toLowerCase().includes(section));
+            if (!block) return {found: false};
+            const buttons = Array.from(block.querySelectorAll('button'))
+                .filter(btn => (btn.innerText || '').trim().toUpperCase() === mode);
+            if (!buttons.length) return {found: false};
+            const button = buttons[0];
+            const already = button.className.includes('search-tab-active');
+            if (!already) button.click();
+            return {found: true, already};
+        }
+        """,
+        {"section": section, "mode": mode},
+    )
+    if changed.get("found"):
+        await log(f"   ✅ {section.title()} mode set to {mode}")
+        await asyncio.sleep(0.3)
+
+
+async def _wait_for_app_idle(page: Page, timeout: int = 20_000):
+    try:
+        await page.wait_for_function(
+            """
+            () => {
+                const progress = document.querySelector('#toolbar-progress');
+                const spinner = document.querySelector('.loader-spin');
+                const visible = el => !!el && el.offsetParent !== null;
+                return !visible(progress) && !visible(spinner);
+            }
+            """,
+            timeout=timeout,
+        )
+    except Exception:
+        pass
+
+
+async def _set_section_checkbox(page: Page, section: str, label: str, should_check: bool, emit=None):
+    async def log(m):
+        if emit: await emit(m)
+
+    result = await page.evaluate(
+        """
+        ({section, label, shouldCheck}) => {
+            const blocks = Array.from(document.querySelectorAll('.mobile_input, .search_multiport_div'));
+            const block = blocks.find(el => (el.innerText || '').toLowerCase().includes(section));
+            if (!block) return {found: false};
+            const boxes = Array.from(block.querySelectorAll('md-checkbox, [role="checkbox"]'));
+            const box = boxes.find(el => (el.innerText || '').toLowerCase().includes(label.toLowerCase()));
+            if (!box) return {found: false};
+            const checked = box.getAttribute('aria-checked') === 'true';
+            if (checked !== shouldCheck) box.click();
+            return {found: true, checked};
+        }
+        """,
+        {"section": section, "label": label, "shouldCheck": should_check},
+    )
+    if result.get("found"):
+        await log(f"   ✅ {section.title()} {label}: {'on' if should_check else 'off'}")
+        await asyncio.sleep(0.2)
+
+
+async def _fill_date(page: Page, date_str: str, emit=None):
+    """Fills the cut-off date field."""
+    async def log(m):
+        if emit: await emit(m)
+
+    date_selectors = [
+        ".md-datepicker-input:visible",
+        "input.md-datepicker-input:visible",
+        "input[placeholder*='date' i]",
+        "input[placeholder*='cut' i]",
+        "input[name*='date' i]",
+        "input[name*='cut' i]",
+        "input[type='date']",
+    ]
+
+    for sel in date_selectors:
+        el = page.locator(sel)
+        if await el.count() > 0:
+            visible = await el.first.is_visible()
+            if visible:
+                await el.first.click()
+                await asyncio.sleep(0.3)
+                await el.first.triple_click()
+                await el.first.fill(_kappal_date_value(date_str))
+                await page.keyboard.press("Tab")
+                await log(f"   ✅ Date set via {sel}")
+                return
+
+    # Fallback: look for a calendar/date icon and click it
+    await log("   ⚠️  Date input not found by selector — trying calendar icon …")
+    icon = page.locator(
+        "svg[class*='calendar' i], [class*='calendar-icon'], [class*='datepicker'] svg"
+    ).first
+    if await icon.count() > 0:
+        await icon.click()
+        await asyncio.sleep(0.5)
+        # After opening calendar, try to find a text input that appeared
+        inp = page.locator("input[class*='date']:visible, .react-datepicker__input-container input:visible")
+        if await inp.count() > 0:
+            await inp.first.triple_click()
+            await inp.first.fill(_kappal_date_value(date_str))
+            await page.keyboard.press("Enter")
+            await log("   ✅ Date set via calendar icon fallback")
+            return
+
+    await log("   ⚠️  Could not fill date field — may need manual selector")
+
+
+def _kappal_date_value(date_str: str) -> str:
+    for fmt in ("%d %b %Y", "%d %B %Y", "%d/%m/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(date_str.strip(), fmt).strftime("%d/%m/%Y")
+        except ValueError:
+            pass
+    return date_str
+
+
+async def _fill_load_type(page: Page, load_type: str, quantity: int, emit=None):
+    """Fills the load type / container type dropdown."""
+    async def log(m):
+        if emit: await emit(m)
+
+    load_label = f"{load_type} x{quantity}"
+
+    # Try native <select> first
+    for sel in [
+        "select[name*='load' i]", "select[name*='container' i]",
+        "select[name*='equipment' i]", "select",
+    ]:
+        el = page.locator(sel)
+        if await el.count() > 0 and await el.first.is_visible():
+            try:
+                await el.first.select_option(label=load_label)
+                await log(f"   ✅ Load type set via <select>")
+                return
+            except Exception:
+                try:
+                    await el.first.select_option(label=load_type)
+                    await log(f"   ✅ Load type set via <select>")
+                    return
+                except Exception:
+                    pass
+
+    # Custom dropdown: look for a visible element already showing a container type
+    current_selectors = [
+        "#search-open-form .panel-select:has-text('GP'):visible",
+        "#search-open-form md-select:has-text('GP'):visible",
+        "#search-open-form button:has-text('GP'):visible",
+        "#search-open-form div:has-text('20GP'):visible",
+        "#search-open-form div:has-text('40GP'):visible",
+        "#search-open-form div:has-text('40HC'):visible",
+    ]
+    for sel in current_selectors:
+        await _wait_for_app_idle(page)
+        trigger = page.locator(sel).first
+        if await trigger.count() > 0 and await trigger.is_visible():
+            await trigger.click(force=True)
+            await asyncio.sleep(0.4)
+            # Find the option in the opened menu
+            option = page.locator(
+                f"[role='option']:has-text('{load_label}'),"
+                f"li:has-text('{load_label}'),"
+                f"div[class*='option']:has-text('{load_label}'),"
+                f"[role='option']:has-text('{load_type}'),"
+                f"li:has-text('{load_type}'),"
+                f"div[class*='option']:has-text('{load_type}')"
+            ).first
+            if await option.count() > 0 and await option.is_visible():
+                await option.click(force=True)
+                await _wait_for_app_idle(page)
+                await log(f"   ✅ Load type '{load_label}' selected from custom dropdown")
+                return
+            await page.keyboard.press("Escape")
+
+    result = await page.evaluate(
+        """
+        ({loadType, loadLabel}) => {
+            const root = document.querySelector('#search-open-form') || document.body;
+            const candidates = Array.from(root.querySelectorAll('div, md-select, button'))
+                .filter(el => {
+                    const text = el.innerText || '';
+                    const rect = el.getBoundingClientRect();
+                    return rect.width > 80 && rect.height > 20 && /\\b(20GP|40GP|40HC)\\b/.test(text);
+                });
+            const trigger = candidates.find(el => (el.innerText || '').includes(loadType)) || candidates[0];
+            if (!trigger) return {found: false};
+            trigger.click();
+            return {found: true, text: (trigger.innerText || '').slice(0, 80)};
+        }
+        """,
+        {"loadType": load_type, "loadLabel": load_label},
+    )
+    if result.get("found"):
+        await asyncio.sleep(0.4)
+        option = page.locator(
+            f"[role='option']:has-text('{load_label}'),"
+            f"md-option:has-text('{load_label}'),"
+            f"li:has-text('{load_label}'),"
+            f"[role='option']:has-text('{load_type}'),"
+            f"md-option:has-text('{load_type}'),"
+            f"li:has-text('{load_type}')"
+        ).first
+        if await option.count() > 0 and await option.is_visible():
+            await option.click(force=True)
+            await _wait_for_app_idle(page)
+            await log(f"   ✅ Load type '{load_label}' selected from fallback dropdown")
+            return
+        await page.keyboard.press("Escape")
+
+    await log(f"   ⚠️  Could not set load type — may need manual selector")
+
+
+async def _fill_charges(page: Page, charges: str, emit=None):
+    async def log(m):
+        if emit: await emit(m)
+
+    if not charges:
+        return
+
+    trigger = page.locator(
+        ".panel-select-charge:visible, "
+        "div:has-text('Locals & Custom Charges'):visible, "
+        "div:has-text('Freight, Origin'):visible"
+    ).last
+    if await trigger.count() == 0 or not await trigger.is_visible():
+        return
+
+    current = (await trigger.inner_text()).strip()
+    if charges.lower() in current.lower() or current.lower() in charges.lower():
+        await log(f"   ✅ Charges already set: {current[:60]}")
+        return
+
+    await trigger.click(force=True)
+    await asyncio.sleep(0.4)
+    option = page.locator(
+        f"[role='option']:has-text('{charges}'), "
+        f"li:has-text('{charges}'), "
+        f"md-option:has-text('{charges}'), "
+        f"div[class*='option']:has-text('{charges}')"
+    ).first
+    if await option.count() > 0 and await option.is_visible():
+        await option.click(force=True)
+        await log(f"   ✅ Charges set to {charges}")
+    else:
+        await page.keyboard.press("Escape")
+        await log("   ⚠️  Could not change charges; keeping current selection")
+
+
+async def _fill_reference_name(page: Page, reference_name: str, emit=None):
+    async def log(m):
+        if emit: await emit(m)
+
+    if not reference_name:
+        return
+
+    ref = page.locator(
+        "input[placeholder*='reference' i]:visible, "
+        "input[name*='reference' i]:visible"
+    ).first
+    if await ref.count() > 0 and await ref.is_visible():
+        await ref.fill(reference_name)
+        await page.keyboard.press("Tab")
+        await log("   ✅ Search reference name set")
+
+
+async def _fill_currency(page: Page, currency: str, emit=None):
+    async def log(m):
+        if emit: await emit(m)
+
+    currency = (currency or "USD").upper()
+    trigger = page.locator(
+        "select[name*='currency' i]:visible, "
+        "md-select:has-text('USD'):visible, "
+        "div:has-text('Search Currency'):visible, "
+        "div:has-text('USD'):visible"
+    ).last
+    if await trigger.count() == 0 or not await trigger.is_visible():
+        return
+
+    tag_name = (await trigger.evaluate("el => el.tagName")).lower()
+    if tag_name == "select":
+        try:
+            await trigger.select_option(label=currency)
+            await log(f"   ✅ Currency set to {currency}")
+        except Exception:
+            pass
+        return
+
+    current = (await trigger.inner_text()).strip()
+    if currency in current:
+        await log(f"   ✅ Currency already set to {currency}")
+        return
+
+    await trigger.click(force=True)
+    await asyncio.sleep(0.4)
+    option = page.locator(
+        f"[role='option']:has-text('{currency}'), "
+        f"md-option:has-text('{currency}'), "
+        f"li:has-text('{currency}')"
+    ).first
+    if await option.count() > 0 and await option.is_visible():
+        await option.click(force=True)
+        await log(f"   ✅ Currency set to {currency}")
+    else:
+        await page.keyboard.press("Escape")
+
+
+# ─── Results ──────────────────────────────────────────────────────────────────
+
+async def _wait_for_results(page: Page, timeout: int = 25_000):
+    """Waits until at least one result card is visible."""
+    await page.wait_for_function(
+        """
+        () => {
+            const text = document.body?.innerText || '';
+            const urlLooksLikeResults = /\\/rates\\/(fcl|lcl|air|land)\\//i.test(location.pathname);
+            const hasCount = /\\d+\\s+rates?\\s+found/i.test(text);
+            const hasInstantRates = /Instant Rates/i.test(text);
+            const hasDetailsButton = Array.from(document.querySelectorAll('button, a, div, span'))
+                .some(el => /^View\\s+Details$/i.test((el.innerText || '').trim()));
+            const hasRateCards = !!document.querySelector(
+                '[class*="rate-card"], [class*="rateCard"], [class*="result-card"], [class*="instant-rate"]'
+            );
+            return hasDetailsButton || (urlLooksLikeResults && hasCount) || (hasInstantRates && hasRateCards);
+        }
+        """,
+        timeout=timeout,
+    )
+    await asyncio.sleep(0.5)
+
+
+async def _wait_for_results_in_context(ctx, fallback_page: Page, timeout_seconds: int, emit=None):
+    async def log(msg: str):
+        if emit:
+            await emit(msg)
+
+    deadline = asyncio.get_event_loop().time() + timeout_seconds
+    last_status_at = 0
+    last_urls = []
+    result_url_seen_at = {}
+
+    while asyncio.get_event_loop().time() < deadline:
+        pages = list(ctx.pages) or [fallback_page]
+        last_urls = []
+        now = asyncio.get_event_loop().time()
+
+        for candidate in _result_targets(pages):
+            try:
+                last_urls.append(candidate.url)
+                if await _page_has_results(candidate):
+                    diag = await _result_page_diagnostics(candidate)
+                    await log(f"✅ Results detected in {candidate.url}. {diag}")
+                    await asyncio.sleep(0.8)
+                    return candidate
+                if _is_results_url(candidate.url):
+                    result_url_seen_at.setdefault(candidate, now)
+                    elapsed = now - result_url_seen_at[candidate]
+                    if elapsed >= 120:
+                        candidate = await _best_result_target(candidate)
+                        diag = await _result_page_diagnostics(candidate)
+                        await log(
+                            f"✅ Result URL has been stable for {int(elapsed)}s; "
+                            f"starting scrape. {diag}"
+                        )
+                        return candidate
+            except Exception:
+                continue
+
+        if now - last_status_at >= 15:
+            last_status_at = now
+            urls = " | ".join(last_urls[-3:]) if last_urls else "no open Kappal pages detected"
+            await log(f"⏳ Still waiting for result cards. Watching: {urls}")
+
+        await asyncio.sleep(2)
+
+    urls = " | ".join(last_urls[-5:]) if last_urls else "no pages"
+    raise RuntimeError(
+        f"Timed out waiting for Kappal results after {timeout_seconds}s. "
+        f"Last observed page(s): {urls}"
+    )
+
+
+def _is_results_url(url: str) -> bool:
+    return bool(re.search(r"/rates/(fcl|lcl|air|land)/", url or "", re.I))
+
+
+def _result_targets(pages: list):
+    targets = []
+    for page in pages:
+        targets.append(page)
+        try:
+            targets.extend(page.frames)
+        except Exception:
+            pass
+    seen = set()
+    unique = []
+    for target in targets:
+        ident = id(target)
+        if ident not in seen:
+            seen.add(ident)
+            unique.append(target)
+    return unique
+
+
+async def _best_result_target(target):
+    candidates = [target]
+    try:
+        candidates.extend(target.frames)
+    except Exception:
+        pass
+
+    best = target
+    best_score = -1
+    for candidate in candidates:
+        try:
+            result = await _result_detection(candidate)
+            score = (
+                (100 if result.get("hasDetailsButton") else 0)
+                + (50 if result.get("hasCount") else 0)
+                + (20 if result.get("hasRateText") else 0)
+                + min(int(result.get("textLength") or 0), 10000) / 10000
+            )
+            if score > best_score:
+                best = candidate
+                best_score = score
+        except Exception:
+            pass
+    return best
+
+
+async def _result_detection(target) -> dict:
+    return await target.evaluate(
+        """
+        () => {
+            const deepText = (root) => {
+                let out = '';
+                const visit = (node) => {
+                    if (!node) return;
+                    if (node.nodeType === Node.TEXT_NODE) out += ' ' + node.textContent;
+                    if (node.nodeType !== Node.ELEMENT_NODE && node.nodeType !== Node.DOCUMENT_NODE) return;
+                    const el = node;
+                    if (el.shadowRoot) visit(el.shadowRoot);
+                    for (const child of el.childNodes || []) visit(child);
+                };
+                visit(root);
+                return out.replace(/\\s+/g, ' ').trim();
+            };
+            const deepElements = (root) => {
+                const out = [];
+                const visit = (node) => {
+                    if (!node || node.nodeType !== Node.ELEMENT_NODE) return;
+                    out.push(node);
+                    if (node.shadowRoot) {
+                        for (const child of node.shadowRoot.children || []) visit(child);
+                    }
+                    for (const child of node.children || []) visit(child);
+                };
+                for (const child of root.children || []) visit(child);
+                return out;
+            };
+            const text = deepText(document);
+            const path = location.pathname || '';
+            const urlLooksLikeResults = /\\/rates\\/(fcl|lcl|air|land)\\//i.test(path);
+            const hasCount = /\\d+\\s+rates?\\s+found/i.test(text);
+            const hasInstantRates = /Instant Rates/i.test(text);
+            const hasDetailsButton = deepElements(document.documentElement)
+                .some(el => /^View\\s+Details$/i.test((el.innerText || '').trim()));
+            const hasRateText = /Freight Rate/i.test(text) && /Total Rate/i.test(text);
+            return {ok: hasDetailsButton || (urlLooksLikeResults && hasCount) || (hasInstantRates && hasCount) || hasRateText, textLength: text.length, hasCount, hasDetailsButton, hasRateText};
+        }
+        """
+    )
+
+
+async def _page_has_results(target) -> bool:
+    result = await _result_detection(target)
+    return bool(result.get("ok")) if isinstance(result, dict) else bool(result)
+
+
+async def _result_page_diagnostics(page: Page) -> str:
+    try:
+        data = await page.evaluate(
+            """
+            () => {
+                const deepText = (root) => {
+                    let out = '';
+                    const visit = (node) => {
+                        if (!node) return;
+                        if (node.nodeType === Node.TEXT_NODE) out += ' ' + node.textContent;
+                        if (node.nodeType !== Node.ELEMENT_NODE && node.nodeType !== Node.DOCUMENT_NODE) return;
+                        if (node.shadowRoot) visit(node.shadowRoot);
+                        for (const child of node.childNodes || []) visit(child);
+                    };
+                    visit(root);
+                    return out.replace(/\\s+/g, ' ').trim();
+                };
+                const deepElements = (root) => {
+                    const out = [];
+                    const visit = (node) => {
+                        if (!node || node.nodeType !== Node.ELEMENT_NODE) return;
+                        out.push(node);
+                        if (node.shadowRoot) for (const child of node.shadowRoot.children || []) visit(child);
+                        for (const child of node.children || []) visit(child);
+                    };
+                    for (const child of root.children || []) visit(child);
+                    return out;
+                };
+                const text = deepText(document);
+                const buttons = deepElements(document.documentElement)
+                    .filter(el => ['BUTTON', 'A'].includes(el.tagName) || el.getAttribute('role') === 'button')
+                    .map(el => (el.innerText || el.textContent || '').trim())
+                    .filter(Boolean)
+                    .slice(0, 12);
+                const countMatch = text.match(/\\d+\\s+rates?\\s+found/i);
+                return {
+                    textLength: text.length,
+                    countText: countMatch ? countMatch[0] : null,
+                    buttons,
+                    sample: text.slice(0, 140).replace(/\\s+/g, ' '),
+                };
+            }
+            """
+        )
+        return (
+            f"DOM text={data.get('textLength')}, "
+            f"count={data.get('countText')}, "
+            f"buttons={data.get('buttons')}, "
+            f"sample='{data.get('sample')}'"
+        )
+    except Exception as exc:
+        return f"Could not read page diagnostics: {exc}"
+
+
+async def _get_result_count(page: Page) -> int:
+    """Reads the 'N rates found' headline."""
+    try:
+        el = page.locator("text=/\\d+\\s+rates?\\s+found/i")
+        if await el.count() > 0:
+            m = re.search(r"(\d+)", await el.first.inner_text())
+            return int(m.group(1)) if m else 0
+    except Exception:
+        pass
+    try:
+        count = await page.evaluate(
+            """
+            () => {
+                const deepText = (root) => {
+                    let out = '';
+                    const visit = (node) => {
+                        if (!node) return;
+                        if (node.nodeType === Node.TEXT_NODE) out += ' ' + node.textContent;
+                        if (node.nodeType !== Node.ELEMENT_NODE && node.nodeType !== Node.DOCUMENT_NODE) return;
+                        if (node.shadowRoot) visit(node.shadowRoot);
+                        for (const child of node.childNodes || []) visit(child);
+                    };
+                    visit(root);
+                    return out.replace(/\\s+/g, ' ').trim();
+                };
+                const m = deepText(document).match(/(\\d+)\\s+rates?\\s+found/i);
+                return m ? Number(m[1]) : 0;
+            }
+            """
+        )
+        if count:
+            return int(count)
+    except Exception:
+        pass
+    # Fallback: count View Details buttons
+    locator_count = await _view_details_buttons(page).count()
+    if locator_count:
+        return locator_count
+    return await _deep_view_details_count(page)
+
+
+async def _scrape_all_cards(page: Page, total: int, emit) -> list:
+    results = []
+    for i in range(total):
+        await emit(f"  ↳ Card {i + 1} / {total} …")
+        try:
+            # Re-query every iteration (React may re-render the list)
+            btns = _view_details_buttons(page)
+            if await btns.count() > i:
+                btn = btns.nth(i)
+            else:
+                btn = None
+
+            # Extract summary from the card container BEFORE opening modal
+            summary = {}
+            if btn is not None:
+                card_box = btn.locator(
+                    "xpath=ancestor::div[contains(@class,'card') or contains(@class,'Card') "
+                    "or contains(@class,'rate') or contains(@class,'Rate')][1]"
+                )
+                summary = await _extract_card_summary(card_box)
+
+            # Open modal
+            if btn is not None:
+                await btn.scroll_into_view_if_needed()
+                await btn.click()
+            else:
+                await _deep_click_view_details(page, i)
+            await page.wait_for_selector(
+                "[role='dialog'], .modal, [class*='Modal'], [class*='details-modal']",
+                timeout=10_000,
+            )
+            await asyncio.sleep(0.6)
+
+            # Scrape modal
+            details = await _extract_modal(page)
+
+            results.append({**summary, **details})
+
+        except Exception as exc:
+            results.append({"_error": str(exc), "_card_index": i})
+
+        finally:
+            await _close_modal(page)
+            await asyncio.sleep(0.5)
+
+    return results
+
+
+async def _scrape_cards_as_they_load(page: Page, emit, quiet_seconds: int = 45, max_seconds: int = 900) -> list:
+    results = []
+    index = 0
+    last_count = 0
+    last_growth_at = asyncio.get_event_loop().time()
+    deadline = last_growth_at + max_seconds
+    last_status_at = 0
+
+    while asyncio.get_event_loop().time() < deadline:
+        visible_count = await _available_card_count(page)
+        now = asyncio.get_event_loop().time()
+
+        if visible_count > last_count:
+            last_count = visible_count
+            last_growth_at = now
+            await emit(f"📦 {visible_count} rate card(s) available so far ...")
+
+        if index < visible_count:
+            await emit(f"  ↳ Card {index + 1} / {visible_count}+ ...")
+            results.append(await _scrape_one_card(page, index))
+            index += 1
+            continue
+
+        if index > 0 and now - last_growth_at >= quiet_seconds and await _results_loader_is_idle(page):
+            await emit(f"✅ Card list stable for {quiet_seconds}s; scraped {len(results)} card(s).")
+            return results
+
+        if now - last_status_at >= 15:
+            last_status_at = now
+            await emit(f"⏳ Waiting for more cards ... visible={visible_count}, scraped={index}")
+
+        await asyncio.sleep(2)
+
+    await emit(f"⚠️  Reached max scrape wait; returning {len(results)} scraped card(s).")
+    return results
+
+
+async def _scrape_one_card(page: Page, index: int) -> dict:
+    try:
+        btns = _view_details_buttons(page)
+        if await btns.count() > index:
+            btn = btns.nth(index)
+        else:
+            btn = None
+
+        summary = {}
+        if btn is not None:
+            card_box = btn.locator(
+                "xpath=ancestor::div[contains(@class,'card') or contains(@class,'Card') "
+                "or contains(@class,'rate') or contains(@class,'Rate')][1]"
+            )
+            summary = await _extract_card_summary(card_box)
+
+        if btn is not None:
+            await btn.scroll_into_view_if_needed()
+            await btn.click()
+        else:
+            await _deep_click_view_details(page, index)
+
+        await page.wait_for_selector(
+            "[role='dialog'], .modal, [class*='Modal'], [class*='details-modal']",
+            timeout=10_000,
+        )
+        await asyncio.sleep(0.6)
+        details = await _extract_modal(page)
+        return {**summary, **details}
+
+    except Exception as exc:
+        return {"_error": str(exc), "_card_index": index}
+
+    finally:
+        await _close_modal(page)
+        await asyncio.sleep(0.5)
+
+
+async def _available_card_count(page: Page) -> int:
+    locator_count = await _view_details_buttons(page).count()
+    deep_count = await _deep_view_details_count(page)
+    return max(locator_count, deep_count)
+
+
+async def _results_loader_is_idle(page: Page) -> bool:
+    try:
+        return bool(await page.evaluate(
+            """
+            () => {
+                const visible = el => {
+                    if (!el) return false;
+                    const style = getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.visibility !== 'hidden'
+                        && style.display !== 'none'
+                        && Number(style.opacity || 1) > 0.05
+                        && rect.width > 0
+                        && rect.height > 0;
+                };
+                const loaderSelectors = [
+                    '#toolbar-progress',
+                    '.loader-spin',
+                    '.md-mode-indeterminate',
+                    'md-progress-linear',
+                    '.progress-linear',
+                    '[class*="progress"]',
+                    '[class*="loader"]',
+                    '[class*="loading"]'
+                ];
+                return !loaderSelectors.some(sel => Array.from(document.querySelectorAll(sel)).some(visible));
+            }
+            """
+        ))
+    except Exception:
+        return True
+
+
+def _view_details_buttons(page: Page) -> Locator:
+    return page.locator(
+        "button:has-text('View Details'), "
+        "a:has-text('View Details'), "
+        "[role='button']:has-text('View Details')"
+    )
+
+
+async def _deep_view_details_count(page: Page) -> int:
+    return int(await page.evaluate(
+        """
+        () => {
+            const els = [];
+            const visit = (node) => {
+                if (!node || node.nodeType !== Node.ELEMENT_NODE) return;
+                const text = (node.innerText || node.textContent || '').trim();
+                if (/^View\\s+Details$/i.test(text)) els.push(node);
+                if (node.shadowRoot) for (const child of node.shadowRoot.children || []) visit(child);
+                for (const child of node.children || []) visit(child);
+            };
+            visit(document.documentElement);
+            return els.length;
+        }
+        """
+    ))
+
+
+async def _deep_click_view_details(page: Page, index: int):
+    clicked = await page.evaluate(
+        """
+        (index) => {
+            const els = [];
+            const visit = (node) => {
+                if (!node || node.nodeType !== Node.ELEMENT_NODE) return;
+                const text = (node.innerText || node.textContent || '').trim();
+                if (/^View\\s+Details$/i.test(text)) els.push(node);
+                if (node.shadowRoot) for (const child of node.shadowRoot.children || []) visit(child);
+                for (const child of node.children || []) visit(child);
+            };
+            visit(document.documentElement);
+            const el = els[index];
+            if (!el) return false;
+            el.scrollIntoView({block: 'center', inline: 'center'});
+            el.click();
+            return true;
+        }
+        """,
+        index,
+    )
+    if not clicked:
+        raise RuntimeError(f"Could not find View Details button #{index + 1}")
+
+
+# ─── Card summary (visible on results list) ───────────────────────────────────
+
+async def _extract_card_summary(card: Locator) -> dict:
+    summary = {
+        "card_service":     None,
+        "card_service_type": None,
+        "card_carrier":     None,
+        "card_sailing_date": None,
+        "card_transit_time": None,
+        "card_free_days":   None,
+        "card_cargo_type":  None,
+        "card_freight_rate": None,
+        "card_total_rate":   None,
+    }
+    try:
+        text = await card.inner_text()
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+
+        # Sailing date  e.g. "09 Jun 2026"
+        for line in lines:
+            if re.match(r"\d{2}\s+[A-Za-z]{3}\s+\d{4}", line):
+                summary["card_sailing_date"] = line
+                break
+
+        # Transit time  e.g. "40 Days"
+        for line in lines:
+            m = re.search(r"(\d+)\s*days?", line, re.I)
+            if m:
+                summary["card_transit_time"] = line.strip()
+                break
+
+        # Rates  e.g. "USD 2,465.11"
+        usd_amounts = re.findall(r"USD\s*([\d,]+\.?\d*)", text)
+        if len(usd_amounts) >= 1:
+            summary["card_freight_rate"] = float(usd_amounts[0].replace(",", ""))
+        if len(usd_amounts) >= 2:
+            summary["card_total_rate"] = float(usd_amounts[1].replace(",", ""))
+
+        # Cargo type  FAK
+        if "FAK" in text:
+            summary["card_cargo_type"] = "FAK"
+
+        # Carrier name (look for known liners or grab from specific element)
+        carrier_el = card.locator("[class*='carrier'], [class*='liner'], [class*='Carrier']")
+        if await carrier_el.count() > 0:
+            summary["card_carrier"] = (await carrier_el.first.inner_text()).strip()
+
+        # Service type e.g. CY/CY
+        m = re.search(r"(CY|DOOR|CFS)/(CY|DOOR|CFS)", text)
+        if m:
+            summary["card_service_type"] = m.group(0)
+
+    except Exception as e:
+        summary["_summary_error"] = str(e)
+
+    return summary
+
+
+# ─── Modal extraction ─────────────────────────────────────────────────────────
+
+async def _extract_modal(page: Page) -> dict:
+    modal = page.locator(
+        "[role='dialog'], .modal, [class*='Modal'], [class*='details-modal']"
+    ).first
+
+    header   = await _extract_modal_header(modal)
+
+    # Charges tab
+    await _click_tab(modal, "Charges")
+    await asyncio.sleep(0.4)
+    charges  = await _extract_charges_tab(modal)
+
+    # Remarks & Inclusions tab
+    await _click_tab(modal, "Remarks")
+    await asyncio.sleep(0.3)
+    remarks  = await _extract_remarks_tab(modal)
+
+    # Schedule tab
+    await _click_tab(modal, "Schedule")
+    await asyncio.sleep(0.3)
+    schedule = await _extract_schedule_tab(modal)
+    charges = _prefer_clean_charge_rows(charges, schedule)
+
+    # Free Days tab
+    await _click_tab(modal, "Free Days")
+    await asyncio.sleep(0.3)
+    free_days = await _extract_free_days_tab(modal)
+
+    return {
+        **header,
+        "charges":              charges,
+        "remarks_and_inclusions": remarks,
+        "schedule":             schedule,
+        "free_days":            free_days,
+    }
+
+
+async def _extract_modal_header(modal: Locator) -> dict:
+    result = {
+        "port_of_origin":             None,
+        "port_of_loading":            None,
+        "transshipment_port":         None,
+        "port_of_discharge":          None,
+        "carrier":                    None,
+        "service_name":               None,
+        "service_type":               None,
+        "origin_service_mode":        None,
+        "destination_service_mode":   None,
+        "transit_time":               None,
+        "sailing_date":               None,
+        "incoterms":                  None,
+        "cargo_type":                 None,
+        "commodity":                  None,
+        "total_cost":                 None,
+        "freight_subtotal":           None,
+    }
+    try:
+        # Go back to Charges tab first so header is fully rendered
+        await _click_tab(modal, "Charges")
+        await asyncio.sleep(0.2)
+
+        text = await modal.inner_text()
+        fields = _modal_label_fields(text)
+
+        result["port_of_origin"] = _port_code(fields.get("Port of Origin"))
+        result["port_of_loading"] = _port_code(fields.get("Port of Loading"))
+        result["transshipment_port"] = _port_code(fields.get("Via") or fields.get("V/S"))
+        result["port_of_discharge"] = _port_code(fields.get("Port Of Discharge"))
+        result["carrier"] = fields.get("Liner/Carrier")
+        result["service_type"] = fields.get("Service Type")
+        result["origin_service_mode"] = _dash_to_none(fields.get("Origin Service mode"))
+        result["destination_service_mode"] = _dash_to_none(fields.get("Destination Service mode"))
+        result["transit_time"] = _dash_to_none(fields.get("Transit Time"))
+        result["sailing_date"] = _dash_to_none(fields.get("Sailing Date"))
+        result["incoterms"] = _dash_to_none(fields.get("Incoterms"))
+        result["cargo_type"] = _dash_to_none(fields.get("Cargo Type"))
+        result["commodity"] = _dash_to_none(fields.get("Commodity"))
+
+        # Sailing date
+        m = re.search(r"(\d{2}\s+[A-Za-z]{3}\s+\d{4})", text)
+        if not result["sailing_date"] and m:
+            result["sailing_date"] = m.group(1)
+
+        # Transit time
+        m = re.search(r"(\d+)\s*Days?", text, re.I)
+        if not result["transit_time"] and m:
+            result["transit_time"] = m.group(0)
+
+        # Service mode  e.g. CY / CY
+        modes = re.findall(r"\b(CY|DOOR|CFS)\b", text)
+        if not result["origin_service_mode"] and len(modes) >= 2:
+            result["origin_service_mode"]      = modes[0]
+            result["destination_service_mode"] = modes[1]
+
+        # Cargo type
+        if not result["cargo_type"] and "FAK" in text:
+            result["cargo_type"] = "FAK"
+
+        # Total cost
+        usd_amounts = re.findall(r"USD\s*([\d,]+\.\d{2})", text)
+        if usd_amounts:
+            result["total_cost"]       = float(usd_amounts[-1].replace(",", ""))
+        if len(usd_amounts) >= 2:
+            result["freight_subtotal"] = float(usd_amounts[-2].replace(",", ""))
+
+        # Carrier  – look for named element
+        carrier_el = modal.locator(
+            "[class*='carrier'], [class*='Carrier'], [class*='liner'], [class*='Liner']"
+        )
+        if await carrier_el.count() > 0:
+            result["carrier"] = (await carrier_el.first.inner_text()).strip()
+
+    except Exception as e:
+        result["_header_error"] = str(e)
+
+    return result
+
+
+def _modal_label_fields(text: str) -> dict:
+    labels = [
+        "Port of Origin",
+        "Port of Loading",
+        "V/S",
+        "Via",
+        "Liner/Carrier",
+        "Service Type",
+        "Origin Service mode",
+        "Destination Service mode",
+        "Transit Time",
+        "Sailing Date",
+        "Effective Period",
+        "Port Of Discharge",
+        "Incoterms",
+        "Cargo Type",
+        "Commodity",
+    ]
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    fields = {}
+    label_set = {label.lower(): label for label in labels}
+    for i, line in enumerate(lines):
+        canonical = label_set.get(line.lower())
+        if not canonical:
+            continue
+        values = []
+        for next_line in lines[i + 1:]:
+            if next_line.lower() in label_set:
+                break
+            if next_line in {"Schedule", "Charges", "Remarks & Inclusions", "T&C", "Free Days"}:
+                break
+            values.append(next_line)
+        fields[canonical] = " ".join(values).strip() or None
+    return fields
+
+
+def _dash_to_none(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return None if cleaned in {"", "-"} else cleaned
+
+
+def _port_code(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    match = re.search(r"\b([A-Z]{5})\b", value)
+    return match.group(1) if match else value.strip()
+
+
+async def _extract_charges_tab(modal: Locator) -> dict:
+    """
+    Returns:
+    {
+      freight:     { subtotal: {currency, amount}, line_items: [...] },
+      origin:      { subtotal: {currency, amount}, line_items: [...] },
+      destination: { subtotal: {currency, amount}, line_items: [...] },
+    }
+    Each line_item: { name, basis, equipment_type, quantity, unit_price:{currency,amount}, amount:{currency,amount} }
+    """
+    sections = {
+        "freight":     {"subtotal": None, "line_items": []},
+        "origin":      {"subtotal": None, "line_items": []},
+        "destination": {"subtotal": None, "line_items": []},
+    }
+    current = "freight"
+
+    try:
+        # Find all rows; detect section boundaries by header cells / section headings
+        rows = modal.locator("tr")
+        count = await rows.count()
+        if count == 0:
+            rows = modal.locator("[class*='row'], [layout='row']")
+            count = await rows.count()
+
+        for i in range(count):
+            row = rows.nth(i)
+            row_text = (await row.inner_text()).strip()
+            row_text = re.sub(r"\s+", " ", row_text)
+
+            # Section header detection
+            row_lower = row_text.lower()
+            if re.search(r"\borigin\s+charges?\b", row_lower):
+                current = "origin"
+                # Try to grab subtotal from same row
+                m = re.search(r"([A-Z]{3})\s*([\d,]+\.?\d*)", row_text)
+                if m:
+                    sections[current]["subtotal"] = {
+                        "currency": m.group(1), "amount": float(m.group(2).replace(",", ""))
+                    }
+                continue
+            if re.search(r"\bdestination\s+charges?\b", row_lower):
+                current = "destination"
+                m = re.search(r"([A-Z]{3})\s*([\d,]+\.?\d*)", row_text)
+                if m:
+                    sections[current]["subtotal"] = {
+                        "currency": m.group(1), "amount": float(m.group(2).replace(",", ""))
+                    }
+                continue
+            if re.search(r"\bfreight\b", row_lower) and "sub" not in row_lower and i < 5:
+                current = "freight"
+                continue
+
+            # Sub-total row
+            if re.search(r"\bsub\s*total\b", row_lower, re.I):
+                m = re.search(r"([A-Z]{3})\s*([\d,]+\.?\d*)", row_text)
+                if m:
+                    sections[current]["subtotal"] = {
+                        "currency": m.group(1), "amount": float(m.group(2).replace(",", ""))
+                    }
+                continue
+
+            # Data row – must have at least 4 cells
+            cells = row.locator("td")
+            cell_count = await cells.count()
+            if cell_count < 4:
+                continue
+
+            name = (await cells.nth(0).inner_text()).strip()
+            if not name or name.lower() in ("charges", "name"):
+                continue  # skip header rows
+
+            item = {
+                "name":           name,
+                "basis":          (await cells.nth(1).inner_text()).strip() if cell_count > 1 else None,
+                "equipment_type": (await cells.nth(2).inner_text()).strip() if cell_count > 2 else None,
+                "quantity":       (await cells.nth(3).inner_text()).strip() if cell_count > 3 else None,
+                "unit_price":     _parse_amount(await cells.nth(4).inner_text() if cell_count > 4 else ""),
+                "amount":         _parse_amount(await cells.nth(5).inner_text() if cell_count > 5 else ""),
+            }
+            sections[current]["line_items"].append(item)
+
+        if not any(section["line_items"] for section in sections.values()):
+            sections = _extract_charges_from_text(await modal.inner_text(), sections)
+
+    except Exception as e:
+        sections["_error"] = str(e)
+
+    return sections
+
+
+def _extract_charges_from_text(text: str, sections: dict) -> dict:
+    current = "freight"
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for i, line in enumerate(lines):
+        low = line.lower()
+        if low == "freight" or low.startswith("freight "):
+            current = "freight"
+            continue
+        if "origin charges" in low:
+            current = "origin"
+            continue
+        if "destination charges" in low:
+            current = "destination"
+            continue
+        if "sub total" in low:
+            amount = _parse_amount(" ".join(lines[i:i + 3]))
+            if amount:
+                sections[current]["subtotal"] = amount
+            continue
+
+        joined = " ".join(lines[i:i + 8])
+        if not re.search(r"\b(USD|INR|EUR)\b", joined):
+            continue
+        if not re.search(r"\b(per equipment|per b/l|per bl|per document|per shipment)\b", joined, re.I):
+            continue
+        if line.lower() in {"charges", "basis", "equipment type", "amount", "comments"}:
+            continue
+
+        item = _parse_charge_line_window(lines[i:i + 10])
+        if item and item["name"] not in {x["name"] for x in sections[current]["line_items"]}:
+            sections[current]["line_items"].append(item)
+
+    return sections
+
+
+def _parse_charge_line_window(lines: list[str]) -> Optional[dict]:
+    name = lines[0]
+    basis = next((x for x in lines if re.search(r"\bper\b", x, re.I)), None)
+    equipment = next((x for x in lines if re.fullmatch(r"\d{2}(GP|HC|HQ|DV|RF)", x, re.I)), None)
+    quantity = next((x for x in lines if re.fullmatch(r"\d+(\.\d+)?", x)), None)
+    amounts = []
+    for i, line in enumerate(lines):
+        if re.fullmatch(r"[A-Z]{3}", line) and i + 1 < len(lines):
+            amount_text = f"{line} {lines[i + 1]}"
+            amount = _parse_amount(amount_text)
+            if amount:
+                amounts.append(amount)
+        else:
+            amount = _parse_amount(line)
+            if amount:
+                amounts.append(amount)
+    if not amounts:
+        return None
+    return {
+        "name": name,
+        "basis": basis,
+        "equipment_type": equipment,
+        "quantity": quantity,
+        "unit_price": amounts[0] if amounts else None,
+        "amount": amounts[-1] if amounts else None,
+    }
+
+
+def _prefer_clean_charge_rows(charges: dict, rows: list[dict]) -> dict:
+    clean_items = []
+    for row in rows or []:
+        name = (row.get("Charges") or "").strip()
+        if not name or name.lower() in {"charges", "total", "sub total"}:
+            continue
+        amount = _parse_amount(row.get("Amount") or "")
+        unit_price = _parse_amount(row.get("Unit Price") or "")
+        if not amount and not unit_price:
+            continue
+        clean_items.append({
+            "name": name,
+            "basis": _blank_to_none(row.get("Basis")),
+            "equipment_type": _blank_to_none(row.get("Equipment Type")),
+            "quantity": _blank_to_none(row.get("Quantity | Slab")),
+            "unit_price": unit_price,
+            "amount": amount or unit_price,
+            "comments": _blank_to_none(row.get("Comments")),
+        })
+
+    if not clean_items:
+        return charges
+
+    freight = charges.setdefault("freight", {"subtotal": None, "line_items": []})
+    freight["line_items"] = clean_items
+    total = clean_items[-1].get("amount")
+    if total:
+        freight["subtotal"] = total
+    return charges
+
+
+def _blank_to_none(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    return cleaned or None
+
+
+async def _extract_remarks_tab(modal: Locator) -> dict:
+    try:
+        text = await modal.inner_text()
+        # Split on "Inclusion" if present
+        parts = re.split(r"(?i)\bInclusion\b", text, maxsplit=1)
+        remarks_raw   = parts[0].strip() if parts else text.strip()
+        inclusions_raw = parts[1].strip() if len(parts) > 1 else ""
+
+        # Clean up tab names from the text
+        for tab in ["Schedule", "Charges", "Remarks & Inclusions", "T&C", "Free Days"]:
+            remarks_raw   = remarks_raw.replace(tab, "").strip()
+            inclusions_raw = inclusions_raw.replace(tab, "").strip()
+
+        return {
+            "remarks":    remarks_raw,
+            "inclusions": inclusions_raw,
+        }
+    except Exception as e:
+        return {"_error": str(e)}
+
+
+async def _extract_schedule_tab(modal: Locator) -> list:
+    schedule = []
+    try:
+        rows = modal.locator("tr")
+        count = await rows.count()
+        headers = []
+        for i in range(count):
+            cells = rows.nth(i).locator("td, th")
+            cell_count = await cells.count()
+            if cell_count == 0:
+                continue
+            values = [(await cells.nth(j).inner_text()).strip() for j in range(cell_count)]
+            if i == 0 or all(v.isupper() or not v for v in values):
+                headers = values
+            else:
+                if headers:
+                    schedule.append(dict(zip(headers, values)))
+                else:
+                    schedule.append({f"col_{j}": values[j] for j in range(len(values))})
+    except Exception as e:
+        schedule.append({"_error": str(e)})
+    return schedule
+
+
+async def _extract_free_days_tab(modal: Locator) -> dict:
+    try:
+        text = await modal.inner_text()
+        # Remove tab nav text
+        for tab in ["Schedule", "Charges", "Remarks & Inclusions", "T&C", "Free Days"]:
+            text = text.replace(tab, "")
+        return {"raw": text.strip()}
+    except Exception as e:
+        return {"_error": str(e)}
+
+
+# ─── Utilities ────────────────────────────────────────────────────────────────
+
+async def _click_tab(modal: Locator, tab_name: str):
+    tab = modal.locator(
+        f"button:has-text('{tab_name}'), "
+        f"[role='tab']:has-text('{tab_name}'), "
+        f"a:has-text('{tab_name}'), "
+        f"span:has-text('{tab_name}')"
+    ).first
+    if await tab.count() > 0:
+        try:
+            await tab.click()
+            await asyncio.sleep(0.2)
+        except Exception:
+            pass
+
+
+async def _close_modal(page: Page):
+    close_btn = page.locator(
+        "[aria-label='Close'], button:has-text('×'), button:has-text('✕'), "
+        "[class*='close']:visible, [class*='Close']:visible, "
+        "button[class*='modal']:visible"
+    ).first
+    try:
+        if await close_btn.count() > 0:
+            await close_btn.click()
+        else:
+            await _press_escape(page)
+        await page.wait_for_selector(
+            "[role='dialog'], .modal, [class*='Modal']",
+            state="hidden",
+            timeout=5_000,
+        )
+    except Exception:
+        await _press_escape(page)
+        await asyncio.sleep(0.5)
+
+
+async def _press_escape(target):
+    if hasattr(target, "keyboard"):
+        await target.keyboard.press("Escape")
+        return
+    if hasattr(target, "page"):
+        await target.page.keyboard.press("Escape")
+
+
+def _parse_amount(text: str) -> Optional[dict]:
+    """'USD 1,930.00'  →  {'currency': 'USD', 'amount': 1930.0}"""
+    if not text or not text.strip():
+        return None
+    m = re.search(r"([A-Z]{3})\s*([\d,]+\.?\d*)", text.strip())
+    if m:
+        return {"currency": m.group(1), "amount": float(m.group(2).replace(",", ""))}
+    # Bare number
+    m2 = re.search(r"([\d,]+\.?\d+)", text.strip())
+    if m2:
+        return {"currency": None, "amount": float(m2.group(1).replace(",", ""))}
+    return {"raw": text.strip()}

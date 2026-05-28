@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Kappal Rate Capture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #07090d;
+    --panel: #10151d;
+    --panel-2: #151b24;
+    --line: #263140;
+    --text: #e7edf5;
+    --muted: #8a96a8;
+    --soft: #485467;
+    --orange: #ff6a00;
+    --orange-2: #ff8a2a;
+    --green: #24c26a;
+    --red: #f05252;
+    --blue: #73a7ff;
+    --mono: "IBM Plex Mono", monospace;
+    --sans: "Inter", system-ui, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+  }
+
+  header {
+    height: 68px;
+    padding: 0 28px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    border-bottom: 1px solid var(--line);
+    background: #0b0f15;
+  }
+
+  .mark {
+    width: 36px;
+    height: 36px;
+    display: grid;
+    place-items: center;
+    border-radius: 8px;
+    background: var(--orange);
+    color: white;
+    font-family: var(--mono);
+    font-weight: 600;
+  }
+
+  h1 {
+    margin: 0;
+    font-size: 16px;
+    letter-spacing: 0;
+  }
+
+  .subtitle {
+    margin-left: auto;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+
+  main {
+    height: calc(100vh - 68px);
+    display: grid;
+    grid-template-columns: 340px 1fr;
+    overflow: hidden;
+  }
+
+  aside {
+    padding: 24px;
+    border-right: 1px solid var(--line);
+    background: var(--panel);
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    overflow-y: auto;
+  }
+
+  .label {
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+  }
+
+  .primary {
+    width: 100%;
+    min-height: 52px;
+    border: 0;
+    border-radius: 8px;
+    background: var(--orange);
+    color: #fff;
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: .04em;
+    cursor: pointer;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .primary:hover:not(:disabled) { background: var(--orange-2); }
+  .primary:disabled { opacity: .55; cursor: wait; }
+
+  .settings {
+    padding: 14px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #0c1118;
+  }
+
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 12px;
+  }
+
+  .field label {
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+
+  .field input {
+    width: 100%;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: #0a0e14;
+    color: var(--text);
+    padding: 10px 12px;
+    font: 14px var(--sans);
+    outline: none;
+  }
+
+  .field input:focus { border-color: var(--orange); }
+
+  .metric-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+
+  .metric {
+    padding: 14px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--panel-2);
+  }
+
+  .metric .value {
+    margin-top: 8px;
+    font-family: var(--mono);
+    font-size: 22px;
+    font-weight: 600;
+  }
+
+  .downloads {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .download {
+    display: none;
+    width: 100%;
+    min-height: 42px;
+    border: 1px solid var(--green);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--green);
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .download.visible { display: block; }
+  .download.excel {
+    color: var(--orange);
+    border-color: var(--orange);
+  }
+
+  .workspace {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .toolbar {
+    height: 54px;
+    padding: 0 22px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    border-bottom: 1px solid var(--line);
+    background: #090d13;
+  }
+
+  .dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--soft);
+  }
+
+  .dot.running { background: var(--orange); animation: pulse 1s infinite; }
+  .dot.done { background: var(--green); }
+  .dot.error { background: var(--red); }
+  @keyframes pulse { 50% { opacity: .35; } }
+
+  .status {
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .count-pill {
+    margin-left: auto;
+    display: none;
+    padding: 4px 9px;
+    border-radius: 5px;
+    background: rgba(255,106,0,.18);
+    color: var(--orange-2);
+    font: 600 12px var(--mono);
+  }
+
+  .count-pill.visible { display: block; }
+
+  .log {
+    height: 172px;
+    overflow-y: auto;
+    padding: 14px 22px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+    font: 12px/1.7 var(--mono);
+  }
+
+  .line {
+    display: flex;
+    gap: 12px;
+    color: var(--text);
+  }
+
+  .line .time {
+    flex: 0 0 auto;
+    color: var(--soft);
+  }
+
+  .line.ok .msg { color: var(--green); }
+  .line.err .msg { color: var(--red); }
+
+  .json {
+    flex: 1;
+    overflow: auto;
+    padding: 22px;
+  }
+
+  .empty {
+    height: 100%;
+    display: grid;
+    place-items: center;
+    color: var(--muted);
+    font: 13px var(--mono);
+  }
+
+  pre {
+    margin: 0;
+    display: none;
+    font: 12px/1.6 var(--mono);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  pre.visible { display: block; }
+  .jk { color: var(--blue); }
+  .js { color: #84e6a5; }
+  .jn { color: #ffd166; }
+  .jb { color: #f59bd7; }
+
+  @media (max-width: 860px) {
+    main { grid-template-columns: 1fr; height: auto; min-height: calc(100vh - 68px); }
+    aside { border-right: 0; border-bottom: 1px solid var(--line); }
+    .workspace { min-height: 640px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="mark">K</div>
+  <h1>Kappal Rate Capture</h1>
+  <div class="subtitle">Excel-ready freight rates</div>
+</header>
+
+<main>
+  <aside>
+    <div>
+      <div class="label">Capture</div>
+      <button class="primary" id="capture-btn" onclick="startCapture()">
+        <span id="capture-icon">↗</span>
+        <span id="capture-label">OPEN KAPPAL & CAPTURE</span>
+      </button>
+    </div>
+
+    <div class="settings">
+      <div class="label">Session</div>
+      <div class="field">
+        <label for="f-timeout">Timeout seconds</label>
+        <input id="f-timeout" type="number" value="900" min="60" max="2400" />
+      </div>
+    </div>
+
+    <div class="metric-grid">
+      <div class="metric">
+        <div class="label">Rates</div>
+        <div class="value" id="metric-rates">0</div>
+      </div>
+      <div class="metric">
+        <div class="label">Status</div>
+        <div class="value" id="metric-status">Idle</div>
+      </div>
+    </div>
+
+    <div class="downloads">
+      <button class="download excel" id="excel-btn" onclick="downloadExcel()">DOWNLOAD EXCEL</button>
+      <button class="download" id="json-btn" onclick="downloadJSON()">DOWNLOAD JSON</button>
+    </div>
+  </aside>
+
+  <section class="workspace">
+    <div class="toolbar">
+      <div class="dot" id="status-dot"></div>
+      <div class="status" id="status-text">Ready</div>
+      <div class="count-pill" id="result-count"></div>
+    </div>
+
+    <div class="log" id="log-area">
+      <div class="line"><span class="time">--:--:--</span><span class="msg">Ready.</span></div>
+    </div>
+
+    <div class="json">
+      <div class="empty" id="json-empty">Captured results will appear here.</div>
+      <pre id="json-output"></pre>
+    </div>
+  </section>
+</main>
+
+<script>
+let ws = null;
+let lastResult = null;
+
+function val(id) { return document.getElementById(id).value.trim(); }
+
+function log(message, type = 'info') {
+  const area = document.getElementById('log-area');
+  const now = new Date().toTimeString().slice(0, 8);
+  const line = document.createElement('div');
+  line.className = `line ${type}`;
+  line.innerHTML = `<span class="time">${now}</span><span class="msg">${escHtml(message)}</span>`;
+  area.appendChild(line);
+  area.scrollTop = area.scrollHeight;
+}
+
+function setStatus(state, message) {
+  const dot = document.getElementById('status-dot');
+  const text = document.getElementById('status-text');
+  dot.className = `dot ${state || ''}`;
+  text.textContent = message;
+  document.getElementById('metric-status').textContent =
+    state === 'running' ? 'Run' : state === 'done' ? 'Done' : state === 'error' ? 'Error' : 'Idle';
+}
+
+function startCapture() {
+  const timeout = parseInt(val('f-timeout')) || 900;
+  clearRunState();
+  setBusy(true);
+  setStatus('running', 'Opening Kappal...');
+  log('Opening Kappal browser session.', 'info');
+
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws/manual-scrape`);
+
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ search_timeout: timeout }));
+  };
+
+  ws.onmessage = (event) => handleMessage(JSON.parse(event.data));
+
+  ws.onerror = () => {
+    log('Connection failed.', 'err');
+    setStatus('error', 'Connection failed');
+    setBusy(false);
+  };
+
+  ws.onclose = () => {
+    if (document.getElementById('status-dot').className.includes('running')) {
+      log('Connection closed unexpectedly.', 'err');
+      setStatus('error', 'Connection closed');
+      setBusy(false);
+    }
+  };
+}
+
+function handleMessage(message) {
+  if (message.type === 'progress') {
+    log(message.message, 'info');
+    setStatus('running', message.message);
+    return;
+  }
+
+  if (message.type === 'complete') {
+    lastResult = message.data;
+    const count = message.data.total_results || 0;
+    log(`Done. ${count} result(s) captured.`, 'ok');
+    setStatus('done', `Captured ${count} rate(s)`);
+    showJSON(message.data);
+    showDownloads(count);
+    setBusy(false);
+    return;
+  }
+
+  if (message.type === 'error') {
+    log(`Error: ${message.message}`, 'err');
+    setStatus('error', 'Capture failed');
+    setBusy(false);
+  }
+}
+
+function setBusy(isBusy) {
+  const button = document.getElementById('capture-btn');
+  button.disabled = isBusy;
+  document.getElementById('capture-icon').textContent = isBusy ? '...' : '↗';
+  document.getElementById('capture-label').textContent = isBusy ? 'CAPTURING RATES' : 'OPEN KAPPAL & CAPTURE';
+}
+
+function clearRunState() {
+  lastResult = null;
+  document.getElementById('json-output').className = '';
+  document.getElementById('json-output').innerHTML = '';
+  document.getElementById('json-empty').style.display = 'grid';
+  document.getElementById('result-count').className = 'count-pill';
+  document.getElementById('metric-rates').textContent = '0';
+  document.getElementById('json-btn').className = 'download';
+  document.getElementById('excel-btn').className = 'download excel';
+  document.getElementById('log-area').innerHTML = '';
+}
+
+function showDownloads(count) {
+  document.getElementById('metric-rates').textContent = String(count);
+  const pill = document.getElementById('result-count');
+  pill.textContent = `${count} results`;
+  pill.className = 'count-pill visible';
+  document.getElementById('json-btn').className = 'download visible';
+  document.getElementById('excel-btn').className = 'download excel visible';
+}
+
+function showJSON(data) {
+  const raw = JSON.stringify(data, null, 2);
+  const highlighted = raw
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"([^"]+)":/g, '<span class="jk">"$1"</span>:')
+    .replace(/: "([^"]*)"/g, ': <span class="js">"$1"</span>')
+    .replace(/: (-?\d+\.?\d*)/g, ': <span class="jn">$1</span>')
+    .replace(/: (true|false|null)/g, ': <span class="jb">$1</span>');
+
+  const pre = document.getElementById('json-output');
+  pre.innerHTML = highlighted;
+  pre.className = 'visible';
+  document.getElementById('json-empty').style.display = 'none';
+}
+
+function downloadJSON() {
+  if (!lastResult) return;
+  const blob = new Blob([JSON.stringify(lastResult, null, 2)], { type: 'application/json' });
+  downloadBlob(blob, `kappal_rates_${new Date().toISOString().slice(0,10)}.json`);
+}
+
+async function downloadExcel() {
+  if (!lastResult) return;
+  const response = await fetch('/export/excel', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(lastResult)
+  });
+  if (!response.ok) {
+    log('Excel export failed.', 'err');
+    return;
+  }
+  downloadBlob(await response.blob(), `kappal_rates_${new Date().toISOString().slice(0,10)}.xlsx`);
+}
+
+function downloadBlob(blob, filename) {
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(link.href);
+}
+
+function escHtml(value) {
+  return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+</script>
+</body>
+</html>
