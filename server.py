@@ -1,7 +1,7 @@
 """
 server.py
 ─────────
-FastAPI backend for the Kappal Rate Scraper.
+FastAPI backend for kappal auto scrapper.
 • Serves the frontend at  GET  /
 • Accepts scrape jobs via  WebSocket  /ws/scrape
   – Streams progress messages back in real time
@@ -25,7 +25,7 @@ from scraper import authenticate_kappal, manual_search_and_scrape_kappal, scrape
 
 # ─── App setup ────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Kappal Rate Scraper", version="1.0.0")
+app = FastAPI(title="kappal auto scrapper", version="1.0.0")
 
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
