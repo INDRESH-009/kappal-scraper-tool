@@ -3,41 +3,110 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>kappal auto scrapper</title>
+<title>Kappal Rate Capture</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
 <style>
   :root {
-    --bg:        #f5f6f8;
+    --bg:        #0b1017;
+    --bg-2:      #101823;
+    --panel:     #141c28;
+    --panel-2:   #192331;
+    --panel-3:   #202b3b;
+
+    --border:    #243246;
+    --border-2:  #30415a;
+    --border-h:  #405775;
+
+    --text:      #edf3f8;
+    --text-2:    #b4c2d2;
+    --muted:     #8192a7;
+    --faint:     #58708f;
+
+    --blue:      #67e8f9;
+    --blue-d:    #0891b2;
+    --blue-dd:   #0e7490;
+    --blue-bg:   rgba(103,232,249,.09);
+    --blue-rg:   rgba(103,232,249,.2);
+    --blue-glow: rgba(103,232,249,.16);
+
+    --green:     #4ade80;
+    --green-d:   #22c55e;
+    --green-bg:  rgba(74,222,128,.08);
+    --green-rg:  rgba(74,222,128,.18);
+
+    --amber:     #fbbf24;
+    --amber-bg:  rgba(251,191,36,.08);
+    --amber-rg:  rgba(251,191,36,.18);
+
+    --red:       #f87171;
+    --red-bg:    rgba(248,113,113,.08);
+    --red-rg:    rgba(248,113,113,.18);
+
+    --grid-line: rgba(148,163,184,.025);
+
+    --mono: "JetBrains Mono", ui-monospace, monospace;
+    --sans: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+
+    --r:    16px;
+    --r-sm: 12px;
+    --r-xs: 999px;
+  }
+
+  html[data-theme="light"] {
+    --bg:        #f4f7fb;
+    --bg-2:      #eef4f8;
     --panel:     #ffffff;
-    --panel-2:   #fafbfc;
-    --border:    #e6e8ec;
-    --border-2:  #d6dae1;
-    --text:      #0f1729;
-    --text-2:    #3f4a5c;
-    --muted:     #67738a;
-    --faint:     #98a2b3;
+    --panel-2:   #f8fbfd;
+    --panel-3:   #eef5f8;
 
-    --accent:    #2f5be3;
-    --accent-d:  #2447bf;
-    --accent-bg: #eef2ff;
-    --accent-rg: rgba(47,91,227,.16);
+    --border:    #e2e8f0;
+    --border-2:  #cbd5e1;
+    --border-h:  #94a3b8;
 
-    --green:     #0c7a55;
-    --green-bg:  #e6f6ef;
-    --amber:     #b25b09;
-    --amber-bg:  #fdf0e3;
-    --red:       #be2f23;
-    --red-bg:    #fdeae8;
+    --text:      #0f172a;
+    --text-2:    #334155;
+    --muted:     #64748b;
+    --faint:     #94a3b8;
 
-    --mono: "IBM Plex Mono", ui-monospace, monospace;
-    --sans: "IBM Plex Sans", system-ui, sans-serif;
+    --blue:      #0e7490;
+    --blue-d:    #0891b2;
+    --blue-dd:   #0e7490;
+    --blue-bg:   rgba(8,145,178,.08);
+    --blue-rg:   rgba(8,145,178,.18);
+    --blue-glow: rgba(8,145,178,.14);
 
-    --r:   10px;
-    --r-sm: 7px;
-    --shadow: 0 1px 2px rgba(15,23,41,.05), 0 1px 1px rgba(15,23,41,.04);
-    --shadow-md: 0 4px 14px rgba(15,23,41,.07);
+    --green:     #15803d;
+    --green-d:   #16a34a;
+    --green-bg:  rgba(22,163,74,.08);
+    --green-rg:  rgba(22,163,74,.18);
+
+    --amber:     #b45309;
+    --amber-bg:  rgba(217,119,6,.08);
+    --amber-rg:  rgba(217,119,6,.2);
+
+    --red:       #dc2626;
+    --red-bg:    rgba(220,38,38,.08);
+    --red-rg:    rgba(220,38,38,.18);
+
+    --grid-line: rgba(100,116,139,.08);
+  }
+
+  html[data-theme="light"] .theme-toggle,
+  html[data-theme="light"] .log-action,
+  html[data-theme="light"] .primary.secondary {
+    background: #ffffff;
+    color: #475569;
+    border-color: #cbd5e1;
+  }
+
+  html[data-theme="light"] .theme-toggle:hover,
+  html[data-theme="light"] .log-action:hover,
+  html[data-theme="light"] .primary.secondary:hover:not(:disabled) {
+    background: #eef7f8;
+    color: #0e7490;
+    border-color: rgba(8,145,178,.28);
   }
 
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -47,183 +116,351 @@
     background: var(--bg);
     color: var(--text);
     font-family: var(--sans);
-    font-size: 14px;
+    font-size: 13px;
     -webkit-font-smoothing: antialiased;
     display: flex;
     flex-direction: column;
     overflow: hidden;
   }
 
-  ::selection { background: var(--accent-rg); }
+  /* subtle grid texture on bg */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(var(--grid-line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+    background-size: 40px 40px;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  ::selection { background: var(--blue-rg); color: var(--text); }
 
   /* ── Top app bar ─────────────────────────────── */
   .topbar {
-    height: 58px;
+    position: relative;
+    z-index: 10;
+    height: 52px;
     flex-shrink: 0;
     background: var(--panel);
     border-bottom: 1px solid var(--border);
     display: flex;
     align-items: center;
     gap: 14px;
-    padding: 0 22px;
+    padding: 0 20px;
   }
   .logo {
-    width: 32px; height: 32px;
-    border-radius: 8px;
-    background: var(--accent);
+    width: 28px; height: 28px;
+    border-radius: 9px;
+    background: linear-gradient(135deg, #0891b2 0%, #14b8a6 100%);
     color: #fff;
     display: grid; place-items: center;
     font-weight: 700;
-    font-size: 16px;
+    font-size: 13px;
     flex-shrink: 0;
-    box-shadow: inset 0 1px 0 rgba(255,255,255,.25);
-  }
-  .brand-name {
-    font-size: 15px;
-    font-weight: 600;
     letter-spacing: -.01em;
   }
-  .tb-divider { width: 1px; height: 22px; background: var(--border-2); }
-  .tb-crumb {
-    font-size: 13px;
-    color: var(--muted);
+  .brand-name {
+    font-size: 13.5px;
     font-weight: 500;
+    color: var(--text);
+    letter-spacing: -.01em;
   }
-  .topbar-right { margin-left: auto; display: flex; align-items: center; gap: 14px; }
+  .tb-divider {
+    width: 1px; height: 18px;
+    background: var(--border);
+  }
+  .tb-crumb {
+    font-size: 12px;
+    color: var(--muted);
+    font-family: var(--sans);
+  }
+  .topbar-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+
+  .theme-toggle {
+    height: 28px;
+    border-radius: 99px;
+    border: 1px solid var(--border-2);
+    background: var(--panel-2);
+    color: var(--text-2);
+    font-family: var(--sans);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 0 10px;
+    transition: background .12s, border-color .12s, color .12s;
+  }
+  .theme-toggle:hover {
+    background: var(--panel-3);
+    border-color: var(--border-h);
+    color: var(--text);
+  }
+  .theme-icon {
+    width: 14px;
+    height: 14px;
+    display: inline-grid;
+    place-items: center;
+    font-size: 12px;
+    line-height: 1;
+  }
+
   .env-chip {
-    font-family: var(--mono);
-    font-size: 11px;
+    font-family: var(--sans);
+    font-size: 12px;
     color: var(--muted);
     border: 1px solid var(--border-2);
     border-radius: 99px;
-    padding: 4px 11px;
-    display: flex; align-items: center; gap: 7px;
+    padding: 3px 10px;
+    display: flex; align-items: center; gap: 6px;
+    letter-spacing: .02em;
   }
   .env-chip::before {
-    content: ''; width: 6px; height: 6px; border-radius: 50%;
-    background: var(--green);
+    content: ''; width: 5px; height: 5px; border-radius: 50%;
+    background: var(--green-d);
+    box-shadow: 0 0 6px var(--green-d);
   }
 
-  /* status badge (logic-driven) */
   .badge {
     font-size: 12px;
     font-weight: 600;
-    letter-spacing: .01em;
-    padding: 6px 13px;
-    border-radius: 99px;
+    letter-spacing: 0;
+    padding: 4px 11px;
+    border-radius: var(--r-xs);
     border: 1px solid transparent;
     display: inline-flex;
     align-items: center;
+    gap: 6px;
     white-space: nowrap;
+    font-family: var(--sans);
   }
-  .badge-ready { color: var(--green); background: var(--green-bg); border-color: rgba(12,122,85,.18); }
-  .badge-run   { color: var(--amber); background: var(--amber-bg); border-color: rgba(178,91,9,.2); }
-  .badge-error { color: var(--red);   background: var(--red-bg);   border-color: rgba(190,47,35,.2); }
+  .badge-ready {
+    color: var(--green);
+    background: var(--green-bg);
+    border-color: var(--green-rg);
+  }
+  .badge-run {
+    color: var(--amber);
+    background: var(--amber-bg);
+    border-color: var(--amber-rg);
+  }
+  .badge-error {
+    color: var(--red);
+    background: var(--red-bg);
+    border-color: var(--red-rg);
+  }
 
   /* ── Content shell ───────────────────────────── */
   .content {
+    position: relative;
+    z-index: 1;
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: 26px 28px 36px;
+    padding: 24px 24px 36px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-2) transparent;
   }
-  .wrap { max-width: 1320px; margin: 0 auto; }
+  .content::-webkit-scrollbar { width: 5px; }
+  .content::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 5px; }
+
+  .wrap { max-width: 1300px; margin: 0 auto; }
 
   .page-head {
     display: flex;
     align-items: flex-end;
     justify-content: space-between;
     gap: 20px;
-    margin-bottom: 22px;
+    margin-bottom: 20px;
   }
-  .page-title { font-size: 22px; font-weight: 600; letter-spacing: -.02em; }
-  .page-sub { margin-top: 4px; font-size: 13.5px; color: var(--muted); }
+  .page-title {
+    font-size: 24px;
+    font-weight: 650;
+    color: var(--text);
+    letter-spacing: -.025em;
+  }
+  .page-sub {
+    margin-top: 7px;
+    font-size: 13.5px;
+    color: var(--muted);
+    font-family: var(--sans);
+  }
 
-  /* ── KPI tiles ───────────────────────────────── */
-  .kpis {
-    display: grid;
-    grid-template-columns: 1fr 1fr 1.7fr;
-    gap: 16px;
-    margin-bottom: 16px;
-  }
+  /* ── Cards / status tiles ────────────────────── */
   .card {
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: var(--r);
-    box-shadow: var(--shadow);
+    position: relative;
+    overflow: hidden;
+    box-shadow: 0 18px 50px rgba(0,0,0,.16);
   }
+  html[data-theme="light"] .card {
+    box-shadow: 0 12px 30px rgba(15,23,42,.06);
+  }
+  /* top edge highlight */
+  .card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--border-h), transparent);
+    pointer-events: none;
+  }
+
   .kpi { padding: 16px 18px; display: flex; flex-direction: column; }
   .kpi-label {
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 600;
-    letter-spacing: .06em;
-    text-transform: uppercase;
+    letter-spacing: 0;
+    text-transform: none;
     color: var(--muted);
-    display: flex; align-items: center; gap: 7px;
+    font-family: var(--sans);
   }
   .kpi-value {
-    margin-top: 10px;
-    font-size: 34px;
-    font-weight: 600;
-    letter-spacing: -.02em;
+    margin-top: 12px;
+    font-size: 32px;
+    font-weight: 300;
+    letter-spacing: -.04em;
     line-height: 1;
     font-variant-numeric: tabular-nums;
+    color: var(--text);
   }
-  #metric-status { font-size: 26px; }
-  .kpi-foot { margin-top: 9px; font-size: 12px; color: var(--faint); }
+  #metric-status { font-size: 24px; }
+  .kpi-foot {
+    margin-top: 10px;
+    font-size: 11px;
+    color: var(--faint);
+    font-family: var(--sans);
+  }
 
   /* connection tile */
   .kpi.conn { justify-content: center; gap: 0; }
-  .conn-row { display: flex; align-items: center; gap: 11px; }
+  .conn-row { display: flex; align-items: center; gap: 10px; }
   .dot {
-    width: 9px; height: 9px; border-radius: 50%;
+    width: 8px; height: 8px; border-radius: 50%;
     background: var(--faint); flex-shrink: 0;
-    box-shadow: 0 0 0 4px rgba(152,162,179,.16);
   }
-  .dot.running { background: var(--amber); box-shadow: 0 0 0 4px var(--amber-bg); animation: pulse 1.2s ease-in-out infinite; }
-  .dot.done    { background: var(--green); box-shadow: 0 0 0 4px var(--green-bg); }
-  .dot.error   { background: var(--red);   box-shadow: 0 0 0 4px var(--red-bg); }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+  .dot.running {
+    background: var(--amber);
+    box-shadow: 0 0 0 3px var(--amber-bg), 0 0 8px var(--amber);
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+  .dot.done {
+    background: var(--green);
+    box-shadow: 0 0 0 3px var(--green-bg), 0 0 8px var(--green-d);
+  }
+  .dot.error {
+    background: var(--red);
+    box-shadow: 0 0 0 3px var(--red-bg), 0 0 8px var(--red);
+  }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.25} }
   .status {
-    font-family: var(--mono);
+    font-family: var(--sans);
     font-size: 13px;
     color: var(--text-2);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
 
-  /* ── Main grid ───────────────────────────────── */
-  .grid {
+  .action-row {
     display: grid;
-    grid-template-columns: 1fr 380px;
-    gap: 16px;
-    align-items: start;
+    grid-template-columns: minmax(0, .95fr) minmax(0, 1.1fr) minmax(0, .95fr);
+    gap: 14px;
+    align-items: stretch;
+    margin-bottom: 14px;
+  }
+  .action-row > .card {
+    min-width: 0;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+  }
+  .action-row .card-head {
+    height: 38px;
+  }
+  .action-row .card-body,
+  .action-row .export-summary {
+    min-height: 132px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+  }
+  .action-row .card-body {
+    padding: 12px 14px 13px;
+  }
+  .action-row .field {
+    margin-bottom: 10px;
+  }
+  .action-row .field label {
+    margin-bottom: 6px;
+  }
+  .action-row .field input {
+    height: 34px;
+  }
+  .action-row .primary {
+    height: 36px;
+  }
+  .action-row .primary,
+  .action-row .export-actions {
+    margin-top: auto;
+  }
+  .action-row .field-hint {
+    display: none;
+  }
+  .side-metrics {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .status-row {
+    margin-top: 12px;
+  }
+  .metric-mini {
+    padding: 11px 14px;
+  }
+  .metric-mini .kpi-value {
+    margin-top: 6px;
+    font-size: 22px;
+  }
+  .metric-mini #metric-status {
+    font-size: 20px;
+  }
+  .metric-mini .conn-row {
+    margin-top: 10px;
   }
 
   .card-head {
-    height: 50px;
-    padding: 0 16px 0 18px;
-    display: flex; align-items: center; gap: 10px;
+    height: 46px;
+    padding: 0 14px 0 16px;
+    display: flex; align-items: center; gap: 8px;
     border-bottom: 1px solid var(--border);
   }
   .card-head h3 {
-    font-size: 13.5px;
-    font-weight: 600;
-    letter-spacing: -.01em;
+    font-size: 13px;
+    font-weight: 650;
+    color: var(--text-2);
     white-space: nowrap;
     flex-shrink: 0;
+    letter-spacing: -.005em;
+    font-family: var(--sans);
+    text-transform: none;
   }
   .card-head .spacer { flex: 1; }
 
   .count-pill {
     display: none;
     font-family: var(--mono);
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 500;
-    color: var(--accent);
-    background: var(--accent-bg);
-    border: 1px solid var(--accent-rg);
-    padding: 3px 10px;
-    border-radius: 99px;
+    color: var(--blue);
+    background: var(--blue-bg);
+    border: 1px solid var(--blue-rg);
+    padding: 2px 9px;
+    border-radius: 999px;
     white-space: nowrap;
     flex-shrink: 0;
   }
@@ -231,7 +468,7 @@
 
   /* ── Buttons ─────────────────────────────────── */
   .btn {
-    height: 38px;
+    height: 36px;
     border-radius: var(--r-sm);
     font-family: var(--sans);
     font-size: 13px;
@@ -240,197 +477,457 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 8px;
-    padding: 0 15px;
+    gap: 7px;
+    padding: 0 13px;
     border: 1px solid transparent;
-    transition: background .14s, border-color .14s, box-shadow .14s, transform .06s;
+    transition: background .12s, border-color .12s, color .12s, transform .06s;
     white-space: nowrap;
+    letter-spacing: 0;
   }
   .btn:active:not(:disabled) { transform: translateY(1px); }
 
   .primary {
     width: 100%;
     height: 44px;
-    background: var(--accent);
+    background: linear-gradient(135deg, #0891b2 0%, #14b8a6 100%);
     color: #fff;
-    font-size: 13.5px;
-    font-weight: 600;
+    font-size: 13px;
+    font-weight: 700;
+    font-family: var(--sans);
     border-radius: var(--r-sm);
     cursor: pointer;
-    border: none;
-    display: flex; align-items: center; justify-content: center; gap: 9px;
-    box-shadow: 0 1px 2px rgba(47,91,227,.35), inset 0 1px 0 rgba(255,255,255,.18);
-    transition: background .14s, box-shadow .14s, transform .06s;
-    font-family: var(--sans);
+    border: 1px solid rgba(96,165,250,.3);
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    letter-spacing: 0;
+    text-transform: none;
+    transition: background .16s, box-shadow .16s, transform .08s, border-color .16s;
+    position: relative;
+    overflow: hidden;
   }
-  .primary:hover:not(:disabled) { background: var(--accent-d); box-shadow: 0 3px 10px rgba(47,91,227,.32); }
+  .primary::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(180deg, rgba(255,255,255,.1) 0%, transparent 100%);
+    pointer-events: none;
+  }
+  .primary:hover:not(:disabled) {
+    background: linear-gradient(135deg, #0e7490 0%, #0f766e 100%);
+    box-shadow: 0 12px 24px rgba(8,145,178,.2), 0 0 32px var(--blue-glow);
+    transform: translateY(-1px);
+  }
   .primary:active:not(:disabled) { transform: translateY(1px); }
-  .primary:disabled { background: #aeb8c9; cursor: wait; box-shadow: none; }
+  .primary:disabled {
+    background: var(--panel-3);
+    color: var(--faint);
+    border-color: var(--border);
+    cursor: wait;
+    box-shadow: none;
+  }
   .btn-icon {
-    width: 18px; height: 18px;
+    width: 16px; height: 16px;
     display: grid; place-items: center;
     font-size: 14px;
     flex-shrink: 0;
   }
 
-  /* download buttons (logic-driven) */
+  /* download buttons */
   .download {
     display: none;
-    height: 34px;
-    border-radius: var(--r-sm);
+    height: 30px;
+    border-radius: 999px;
     font-family: var(--sans);
-    font-size: 12.5px;
-    font-weight: 600;
+    font-size: 12px;
+    font-weight: 650;
     cursor: pointer;
     align-items: center;
-    gap: 7px;
-    padding: 0 13px;
-    background: var(--panel);
+    gap: 6px;
+    padding: 0 11px;
+    background: var(--panel-2);
     border: 1px solid var(--border-2);
     color: var(--text-2);
-    transition: background .14s, border-color .14s, color .14s;
+    letter-spacing: 0;
+    transition: background .12s, border-color .12s, color .12s;
   }
   .download.visible { display: inline-flex; }
   .download::before {
     content: '↓';
     font-family: var(--mono);
     font-weight: 600;
-    font-size: 13px;
+    font-size: 12px;
   }
-  .download:hover { background: var(--panel-2); border-color: var(--border-2); }
-  .download.excel { color: var(--green); border-color: rgba(12,122,85,.32); }
+  .download:hover { background: var(--panel-3); border-color: var(--border-h); }
+  .download.excel { color: var(--green); border-color: var(--green-rg); }
   .download.excel:hover { background: var(--green-bg); }
-  .download:not(.excel):hover { color: var(--accent); border-color: var(--accent-rg); background: var(--accent-bg); }
+  .download:not(.excel):hover { color: var(--blue); border-color: var(--blue-rg); background: var(--blue-bg); }
+
+  .log-action {
+    height: 30px;
+    border-radius: 999px;
+    font-family: var(--sans);
+    font-size: 12px;
+    font-weight: 650;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 9px;
+    background: var(--panel-2);
+    border: 1px solid var(--border-2);
+    color: var(--muted);
+    letter-spacing: 0;
+    text-transform: none;
+    transition: background .12s, border-color .12s, color .12s;
+  }
+  .log-action:hover {
+    background: var(--panel-3);
+    border-color: var(--border-h);
+    color: var(--text-2);
+  }
 
   /* ── Config card ─────────────────────────────── */
-  .card-body { padding: 18px; }
-  .field { margin-bottom: 16px; }
+  .card-body { padding: 16px; }
+  .field { margin-bottom: 14px; }
   .field label {
     display: block;
     font-size: 12.5px;
-    font-weight: 600;
-    color: var(--text-2);
-    margin-bottom: 7px;
+    font-weight: 650;
+    color: var(--muted);
+    margin-bottom: 8px;
+    font-family: var(--sans);
+    letter-spacing: 0;
+    text-transform: none;
   }
   .input-wrap { position: relative; }
   .field input {
     width: 100%;
-    height: 40px;
+    height: 42px;
     border: 1px solid var(--border-2);
     border-radius: var(--r-sm);
-    background: var(--panel);
+    background: var(--bg-2);
     color: var(--text);
-    font-family: var(--mono);
-    font-size: 14px;
-    padding: 0 56px 0 13px;
+    font-family: var(--sans);
+    font-size: 13.5px;
+    padding: 0 58px 0 14px;
     outline: none;
-    transition: border-color .14s, box-shadow .14s;
+    transition: border-color .12s, box-shadow .12s;
   }
-  .field input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-rg); }
+  .field input:focus {
+    border-color: var(--blue-d);
+    box-shadow: 0 0 0 3px var(--blue-bg), 0 0 12px var(--blue-glow);
+  }
   .field .suffix {
-    position: absolute; right: 13px; top: 50%; transform: translateY(-50%);
-    font-family: var(--mono);
-    font-size: 11px;
+    position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+    font-family: var(--sans);
+    font-size: 10px;
     color: var(--faint);
     pointer-events: none;
+    letter-spacing: .04em;
+    text-transform: uppercase;
   }
-  .field-hint { font-size: 12px; color: var(--muted); line-height: 1.5; }
-  .file-row { display: flex; gap: 9px; align-items: center; }
-  .file-row input[type="file"] {
-    padding: 9px 10px;
-    height: auto;
-    font-family: var(--sans);
+  .field-hint {
     font-size: 12.5px;
+    color: var(--faint);
+    line-height: 1.6;
+    font-family: var(--sans);
+  }
+  .file-picker {
+    position: relative;
+  }
+  .file-picker input[type="file"] {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .file-drop {
+    min-height: 50px;
+    border: 1px dashed var(--border-2);
+    border-radius: var(--r-sm);
+    background: linear-gradient(180deg, var(--panel-2), var(--bg-2));
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    cursor: pointer;
+    transition: border-color .14s, background .14s, transform .08s;
+  }
+  .file-drop:hover {
+    border-color: var(--blue-d);
+    background: var(--blue-bg);
+  }
+  .file-mark {
+    width: 30px;
+    height: 30px;
+    border-radius: 10px;
+    background: var(--blue-bg);
+    border: 1px solid var(--blue-rg);
+    color: var(--blue);
+    display: grid;
+    place-items: center;
+    font-size: 15px;
+    flex-shrink: 0;
+  }
+  .file-copy {
+    min-width: 0;
+  }
+  .file-copy span {
+    display: block;
+  }
+  .file-title {
+    color: var(--text);
+    font-weight: 700;
+    font-size: 13px;
+  }
+  .file-name {
+    margin-top: 2px;
+    color: var(--muted);
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .secondary {
-    background: var(--panel);
+    background: var(--panel-2);
     color: var(--text-2);
     border: 1px solid var(--border-2);
-    box-shadow: none;
   }
-  .secondary:hover:not(:disabled) { background: var(--panel-2); border-color: var(--accent-rg); color: var(--accent); }
-
-  /* ── Activity log ────────────────────────────── */
-  .log {
-    height: 230px;
-    overflow-y: auto;
-    padding: 12px 16px 14px;
+  .primary.secondary {
     background: var(--panel-2);
-    border-bottom-left-radius: var(--r);
-    border-bottom-right-radius: var(--r);
-    font: 12px/1.85 var(--mono);
-    scrollbar-width: thin;
-    scrollbar-color: var(--border-2) transparent;
-  }
-  .log::-webkit-scrollbar { width: 6px; }
-  .log::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 6px; }
-  .line {
-    display: flex; gap: 12px; align-items: baseline;
-    padding: 1px 0;
-    animation: lineIn .22s ease both;
-  }
-  @keyframes lineIn { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
-  .line .time { flex-shrink: 0; width: 58px; color: var(--faint); }
-  .line .msg  { color: var(--text-2); }
-  .line.ok  .msg { color: var(--green); }
-  .line.err .msg { color: var(--red); }
-
-  /* ── Results / JSON ──────────────────────────── */
-  .results-body {
-    min-height: 420px;
-    max-height: calc(100vh - 360px);
-    overflow: auto;
-    scrollbar-width: thin;
-    scrollbar-color: var(--border-2) transparent;
-  }
-  .results-body::-webkit-scrollbar { width: 8px; }
-  .results-body::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 8px; }
-
-  .empty {
-    min-height: 420px;
-    display: flex; flex-direction: column;
-    align-items: center; justify-content: center;
-    gap: 16px;
-    padding: 40px;
-  }
-  .empty-icon {
-    width: 56px; height: 56px;
-    border-radius: 14px;
-    background: var(--panel-2);
-    border: 1px solid var(--border);
-    display: grid; place-items: center;
-  }
-  .empty-icon svg { width: 26px; height: 26px; }
-  .empty h4 { font-size: 14.5px; font-weight: 600; color: var(--text); }
-  .empty p {
-    font-size: 13px; color: var(--muted);
-    text-align: center; line-height: 1.6; max-width: 280px;
-  }
-
-  pre {
-    margin: 0;
-    display: none;
-    padding: 18px 20px 28px;
-    font: 12.5px/1.75 var(--mono);
-    white-space: pre-wrap;
-    word-break: break-word;
     color: var(--text-2);
   }
-  pre.visible { display: block; }
-  .jk { color: var(--accent); font-weight: 600; }
-  .js { color: var(--green); }
-  .jn { color: var(--amber); }
-  .jb { color: #8a3ffc; }
+  .secondary:hover:not(:disabled) {
+    background: var(--panel-3);
+    border-color: var(--border-h);
+    color: var(--blue);
+  }
+  .secondary::before { display: none; }
+
+  /* ── Run monitor / Activity log ──────────────── */
+  .run-panel {
+    padding: 14px 16px 15px;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, rgba(255,255,255,.015), transparent);
+  }
+  .run-panel-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+  .run-title {
+    font-size: 13px;
+    color: var(--text);
+    font-family: var(--sans);
+    font-weight: 650;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .run-subtitle {
+    margin-top: 4px;
+    font-size: 12px;
+    color: var(--muted);
+    font-family: var(--sans);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .run-clock {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-2);
+    border: 1px solid var(--border-2);
+    border-radius: 999px;
+    padding: 4px 7px;
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+  }
+  .progress-track {
+    height: 6px;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 99px;
+    overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, var(--blue-d), var(--green-d));
+    transition: width .24s ease;
+  }
+  .run-stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .run-stat {
+    min-width: 0;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    padding: 8px 9px;
+    text-align: center;
+  }
+  .run-stat span {
+    display: block;
+    color: var(--muted);
+    font-size: 12px;
+    font-family: var(--sans);
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 600;
+  }
+  .run-stat strong {
+    display: block;
+    margin-top: 5px;
+    color: var(--text);
+    font-size: 14px;
+    font-family: var(--mono);
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: center;
+  }
+
+  .central-monitor .run-panel {
+    padding: 18px 20px;
+  }
+  .central-monitor .run-title {
+    font-size: 16px;
+  }
+  .central-monitor .run-subtitle {
+    font-size: 13px;
+  }
+  .central-monitor .run-clock {
+    font-size: 12px;
+    padding: 5px 9px;
+  }
+  .central-monitor .run-stats {
+    grid-template-columns: repeat(4, 1fr);
+  }
+  .central-monitor .run-stat {
+    padding: 11px 12px;
+  }
+  .central-monitor .run-stat strong {
+    font-size: 20px;
+  }
+
+  .log {
+    height: 300px;
+    overflow-y: auto;
+    padding: 10px 12px 12px;
+    background: var(--bg-2);
+    border-bottom-left-radius: var(--r);
+    border-bottom-right-radius: var(--r);
+    font: 13px/1.5 var(--sans);
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-2) transparent;
+  }
+  .log::-webkit-scrollbar { width: 4px; }
+  .log::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 4px; }
+  .line {
+    display: grid;
+    grid-template-columns: 58px 74px minmax(0, 1fr);
+    gap: 10px;
+    align-items: start;
+    padding: 8px 9px;
+    border: 1px solid transparent;
+    border-radius: var(--r-sm);
+    animation: lineIn .18s ease both;
+  }
+  .line + .line { margin-top: 4px; }
+  @keyframes lineIn { from { opacity: 0; transform: translateX(-3px); } to { opacity: 1; transform: none; } }
+  .line .time {
+    color: var(--faint);
+    font-variant-numeric: tabular-nums;
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+  .line .level {
+    height: 18px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 99px;
+    padding: 0 7px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0;
+    text-transform: none;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    background: var(--panel);
+  }
+  .line .msg {
+    color: var(--text-2);
+    min-width: 0;
+    word-break: break-word;
+  }
+  .line.ok {
+    background: var(--green-bg);
+    border-color: var(--green-rg);
+  }
+  .line.ok .level { color: var(--green); border-color: var(--green-rg); background: rgba(74,222,128,.06); }
+  .line.err {
+    background: var(--red-bg);
+    border-color: var(--red-rg);
+  }
+  .line.err .level { color: var(--red); border-color: var(--red-rg); background: rgba(248,113,113,.06); }
+  .line.wait .level { color: var(--amber); border-color: var(--amber-rg); background: var(--amber-bg); }
+  .line.card .level { color: var(--blue); border-color: var(--blue-rg); background: var(--blue-bg); }
+  .line.system .level { color: var(--text-2); }
+
+  .central-monitor .log {
+    height: calc(100vh - 485px);
+    min-height: 430px;
+  }
+
+  .export-summary {
+    padding: 13px 14px 14px;
+  }
+  .export-number {
+    font-size: 28px;
+    font-weight: 300;
+    letter-spacing: -.04em;
+    line-height: 1;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+  .export-copy {
+    margin-top: 6px;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.45;
+    font-family: var(--sans);
+  }
+  .export-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .export-actions .download {
+    display: inline-flex;
+    justify-content: center;
+    height: 36px;
+  }
+  .export-actions .download:not(.visible) {
+    opacity: .45;
+    pointer-events: none;
+  }
 
   /* ── Responsive ──────────────────────────────── */
   @media (max-width: 960px) {
-    .kpis { grid-template-columns: 1fr 1fr; }
-    .kpis .conn { grid-column: 1 / -1; }
-    .grid { grid-template-columns: 1fr; }
-    .results-body { max-height: none; }
+    .action-row { grid-template-columns: 1fr; }
+    .central-monitor .log { height: 420px; min-height: 420px; }
   }
   @media (max-width: 560px) {
-    .kpis { grid-template-columns: 1fr; }
+    .side-metrics { grid-template-columns: 1fr; }
     .tb-crumb, .tb-divider, .env-chip { display: none; }
   }
 </style>
@@ -439,11 +936,15 @@
 
 <header class="topbar">
   <div class="logo">K</div>
-  <div class="brand-name">kappal auto scrapper</div>
+  <div class="brand-name">Kappal Rate Capture</div>
   <div class="tb-divider"></div>
-  <div class="tb-crumb">Rate Capture · FCL Freight Intelligence</div>
+  <div class="tb-crumb">rate-capture · fcl-automation</div>
   <div class="topbar-right">
-    <div class="env-chip">Production</div>
+    <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" aria-label="Toggle color theme">
+      <span class="theme-icon" id="theme-icon">D</span>
+      <span id="theme-label">Dark</span>
+    </button>
+    <div class="env-chip">production</div>
     <span class="badge badge-ready" id="header-badge">Ready</span>
   </div>
 </header>
@@ -453,61 +954,13 @@
 
     <div class="page-head">
       <div>
-        <div class="page-title">Manual Rate Capture</div>
-        <div class="page-sub">Open a live Kappal session and capture FCL rate results in real time.</div>
+        <div class="page-title">Rate Capture Console</div>
+        <div class="page-sub">live search automation, card parsing, and export-ready rate output</div>
       </div>
     </div>
 
-    <!-- KPI tiles -->
-    <div class="kpis">
-      <div class="card kpi">
-        <div class="kpi-label">Rates Captured</div>
-        <div class="kpi-value" id="metric-rates">0</div>
-        <div class="kpi-foot">Current session</div>
-      </div>
-      <div class="card kpi">
-        <div class="kpi-label">Session Status</div>
-        <div class="kpi-value" id="metric-status">Idle</div>
-        <div class="kpi-foot">Capture state</div>
-      </div>
-      <div class="card kpi conn">
-        <div class="kpi-label">Connection</div>
-        <div class="conn-row" style="margin-top:12px">
-          <div class="dot" id="status-dot"></div>
-          <div class="status" id="status-text">Waiting for session…</div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Main grid -->
-    <div class="grid">
-
-      <!-- Results -->
-      <div class="card">
-        <div class="card-head">
-          <h3>Captured Rates</h3>
-          <span class="count-pill" id="result-count"></span>
-          <div class="spacer"></div>
-          <button class="download excel" id="excel-btn" onclick="downloadExcel()">Excel</button>
-          <button class="download" id="json-btn" onclick="downloadJSON()">JSON</button>
-        </div>
-        <div class="results-body">
-          <div class="empty" id="json-empty">
-            <div class="empty-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="#98a2b3" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M21 8v8a2 2 0 0 1-1 1.73l-7 4a2 2 0 0 1-2 0l-7-4A2 2 0 0 1 3 16V8a2 2 0 0 1 1-1.73l7-4a2 2 0 0 1 2 0l7 4A2 2 0 0 1 21 8Z" />
-                <path d="m3.3 7 8.7 5 8.7-5" /><path d="M12 22V12" />
-              </svg>
-            </div>
-            <h4>No results yet</h4>
-            <p>Start a capture session to pull rate results from Kappal. They'll appear here as structured JSON.</p>
-          </div>
-          <pre id="json-output"></pre>
-        </div>
-      </div>
-
-      <!-- Side column -->
-      <div style="display:flex; flex-direction:column; gap:16px;">
+    <!-- Action cards -->
+    <div class="action-row">
 
         <div class="card">
           <div class="card-head"><h3>Capture Session</h3></div>
@@ -523,7 +976,7 @@
               <span class="btn-icon" id="capture-icon">↗</span>
               <span id="capture-label">Open Kappal &amp; Capture</span>
             </button>
-            <div class="field-hint" style="margin-top:12px">Maximum time to wait for rate results before the session ends.</div>
+            <div class="field-hint" style="margin-top:10px">Maximum wait time before the browser session stops.</div>
           </div>
         </div>
 
@@ -532,29 +985,87 @@
           <div class="card-body">
             <div class="field">
               <label for="batch-file">Batch workbook</label>
-              <div class="file-row">
-                <input id="batch-file" type="file" accept=".xlsx,.xlsm" />
+              <div class="file-picker">
+                <input id="batch-file" type="file" accept=".xlsx,.xlsm" onchange="updateBatchFileName()" />
+                <label class="file-drop" for="batch-file">
+                  <span class="file-mark">↑</span>
+                  <span class="file-copy">
+                    <span class="file-title">Choose workbook</span>
+                    <span class="file-name" id="batch-file-name">No file selected</span>
+                  </span>
+                </label>
               </div>
             </div>
             <button class="primary" id="batch-btn" onclick="startBatch()">
               <span class="btn-icon" id="batch-icon">⇥</span>
               <span id="batch-label">Upload &amp; Run Batch</span>
             </button>
-            <button class="primary secondary" style="margin-top:10px" onclick="downloadBatchTemplate()">
-              <span class="btn-icon">↓</span>
-              <span>Download Test Template</span>
-            </button>
-            <div class="field-hint" id="batch-hint" style="margin-top:12px">Use the one-row template first to verify Kappal auto-fill.</div>
+            <div class="field-hint" id="batch-hint" style="margin-top:10px">Upload a workbook with one or more search rows.</div>
           </div>
         </div>
 
         <div class="card">
-          <div class="card-head"><h3>Activity Log</h3></div>
-          <div class="log" id="log-area">
-            <div class="line"><span class="time">--:--:--</span><span class="msg">Ready. Click "Open Kappal &amp; Capture" to begin.</span></div>
+          <div class="card-head">
+            <h3>Exports</h3>
+            <span class="count-pill" id="result-count"></span>
+          </div>
+          <div class="export-summary">
+            <div class="export-number" id="export-count">0</div>
+            <div class="export-copy" id="export-status">Exports will be available after a successful capture.</div>
+            <div class="export-actions">
+              <button class="download excel" id="excel-btn" onclick="downloadExcel()">Excel</button>
+              <button class="download" id="json-btn" onclick="downloadJSON()">JSON</button>
+            </div>
           </div>
         </div>
 
+    </div>
+
+    <!-- Central run monitor -->
+    <div class="card central-monitor">
+      <div class="card-head">
+        <h3>Live Run Monitor</h3>
+        <div class="spacer"></div>
+        <button class="log-action" onclick="clearLog()">Clear Log</button>
+      </div>
+      <div class="run-panel">
+        <div class="run-panel-top">
+          <div style="min-width:0">
+            <div class="run-title" id="run-title">Ready for capture</div>
+            <div class="run-subtitle" id="run-subtitle">Upload a workbook or start a manual Kappal capture.</div>
+          </div>
+          <div class="run-clock" id="run-clock">00:00</div>
+        </div>
+        <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+        <div class="run-stats">
+          <div class="run-stat"><span>Jobs</span><strong id="stat-jobs">0/0</strong></div>
+          <div class="run-stat"><span>Cards</span><strong id="stat-cards">0</strong></div>
+          <div class="run-stat"><span>Results</span><strong id="stat-results">0</strong></div>
+          <div class="run-stat"><span>Elapsed</span><strong id="stat-elapsed">00:00</strong></div>
+        </div>
+      </div>
+      <div class="log" id="log-area">
+        <div class="line system"><span class="time"></span><span class="level">System</span><span class="msg">Ready for a manual capture or batch run.</span></div>
+      </div>
+    </div>
+
+    <div class="side-metrics status-row">
+      <div class="card kpi metric-mini">
+        <div class="kpi-label">Rates Captured</div>
+        <div class="kpi-value" id="metric-rates">0</div>
+        <div class="kpi-foot">Current session</div>
+      </div>
+      <div class="card kpi metric-mini">
+        <div class="kpi-label">Session Status</div>
+        <div class="kpi-value" id="metric-status">Idle</div>
+        <div class="kpi-foot">Capture state</div>
+      </div>
+      <div class="card kpi conn metric-mini">
+        <div class="kpi-label">Connection</div>
+        <div class="conn-row">
+          <div class="dot" id="status-dot"></div>
+          <div class="status" id="status-text">Waiting for session…</div>
+        </div>
       </div>
     </div>
 
@@ -564,17 +1075,63 @@
 <script>
 let ws = null;
 let lastResult = null;
+let runStartedAt = null;
+let runTimer = null;
+let runState = {
+  totalJobs: 0,
+  currentJob: 0,
+  cards: 0,
+  results: 0,
+  mode: 'idle'
+};
 
 function val(id) { return document.getElementById(id).value.trim(); }
+
+function updateBatchFileName() {
+  const input = document.getElementById('batch-file');
+  const label = document.getElementById('batch-file-name');
+  if (!label) return;
+  label.textContent = input.files && input.files.length ? input.files[0].name : 'No file selected';
+}
+
+function applyTheme(theme) {
+  const normalized = theme === 'light' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = normalized;
+  localStorage.setItem('kappal-theme', normalized);
+  const icon = document.getElementById('theme-icon');
+  const label = document.getElementById('theme-label');
+  if (icon) icon.textContent = normalized === 'light' ? 'L' : 'D';
+  if (label) label.textContent = normalized === 'light' ? 'Light' : 'Dark';
+}
+
+function toggleTheme() {
+  const current = document.documentElement.dataset.theme || 'dark';
+  applyTheme(current === 'light' ? 'dark' : 'light');
+}
+
+function initTheme() {
+  const saved = localStorage.getItem('kappal-theme');
+  const preferred = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches
+    ? 'light'
+    : 'dark';
+  applyTheme(saved || preferred);
+}
+
+initTheme();
 
 function log(message, type = 'info') {
   const area = document.getElementById('log-area');
   const now = new Date().toTimeString().slice(0, 8);
   const line = document.createElement('div');
-  line.className = `line ${type}`;
-  line.innerHTML = `<span class="time">${now}</span><span class="msg">${escHtml(message)}</span>`;
+  const entry = formatLogEntry(message, type);
+  line.className = `line ${entry.type}`;
+  line.innerHTML =
+    `<span class="time">${escHtml(now)}</span>` +
+    `<span class="level">${escHtml(entry.label)}</span>` +
+    `<span class="msg">${escHtml(entry.message)}</span>`;
   area.appendChild(line);
   area.scrollTop = area.scrollHeight;
+  updateRunFromMessage(entry.message, entry.type);
 }
 
 function setStatus(state, message) {
@@ -592,9 +1149,113 @@ function setStatus(state, message) {
   }
 }
 
+function startRun(mode, title, subtitle) {
+  runStartedAt = Date.now();
+  runState = { totalJobs: 0, currentJob: 0, cards: 0, results: 0, mode };
+  document.getElementById('run-title').textContent = title;
+  document.getElementById('run-subtitle').textContent = subtitle;
+  document.getElementById('run-clock').textContent = '00:00';
+  document.getElementById('progress-fill').style.width = '8%';
+  updateRunStats();
+  if (runTimer) clearInterval(runTimer);
+  runTimer = setInterval(updateRunClock, 1000);
+}
+
+function finishRun(count, ok = true) {
+  runState.results = count;
+  document.getElementById('stat-results').textContent = String(count);
+  document.getElementById('progress-fill').style.width = ok ? '100%' : '100%';
+  document.getElementById('run-subtitle').textContent = ok ? 'Capture completed' : 'Capture stopped with an error';
+  if (runTimer) clearInterval(runTimer);
+  runTimer = null;
+  updateRunClock();
+}
+
+function updateRunClock() {
+  if (!runStartedAt) return;
+  const elapsed = Math.max(0, Math.floor((Date.now() - runStartedAt) / 1000));
+  const minutes = String(Math.floor(elapsed / 60)).padStart(2, '0');
+  const seconds = String(elapsed % 60).padStart(2, '0');
+  const formatted = `${minutes}:${seconds}`;
+  document.getElementById('run-clock').textContent = formatted;
+  const statElapsed = document.getElementById('stat-elapsed');
+  if (statElapsed) statElapsed.textContent = formatted;
+}
+
+function updateRunStats() {
+  document.getElementById('stat-jobs').textContent =
+    runState.totalJobs ? `${runState.currentJob}/${runState.totalJobs}` : '0/0';
+  document.getElementById('stat-cards').textContent = String(runState.cards);
+  document.getElementById('stat-results').textContent = String(runState.results);
+  const progress = runState.totalJobs
+    ? Math.min(92, Math.max(10, Math.round((runState.currentJob / runState.totalJobs) * 85)))
+    : Math.min(65, 12 + runState.cards * 4);
+  document.getElementById('progress-fill').style.width = `${progress}%`;
+}
+
+function updateRunFromMessage(message, type) {
+  const batchAccepted = message.match(/accepted:\s*(\d+)\s+search row/i);
+  if (batchAccepted) {
+    runState.totalJobs = Number(batchAccepted[1]);
+    updateRunStats();
+  }
+
+  const rowStart = message.match(/row\s+\d+\s+\((\d+)\/(\d+)\)/i);
+  if (rowStart) {
+    runState.currentJob = Number(rowStart[1]);
+    runState.totalJobs = Number(rowStart[2]);
+    document.getElementById('run-subtitle').textContent = message;
+    updateRunStats();
+  }
+
+  const cards = message.match(/(\d+)\s+rate card\(s\)\s+available/i);
+  if (cards) {
+    runState.cards = Math.max(runState.cards, Number(cards[1]));
+    updateRunStats();
+  }
+
+  const done = message.match(/Done\.\s*(\d+)\s+result/i);
+  if (done) {
+    runState.results = Number(done[1]);
+    updateRunStats();
+  }
+
+  if (type === 'err') {
+    document.getElementById('run-subtitle').textContent = message;
+  }
+}
+
+function formatLogEntry(message, type = 'info') {
+  let clean = String(message || '')
+    .replace(/[✅📦⏳⚠️↳]/g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/\s+\.\.\.$/, '...')
+    .trim();
+
+  if (!clean) clean = 'Progress update received';
+
+  if (type === 'err' || /^error:/i.test(clean) || /failed|timeout|not found|closed unexpectedly/i.test(clean)) {
+    return { type: 'err', label: 'Error', message: clean.replace(/^Error:\s*/i, '') };
+  }
+  if (type === 'ok' || /complete|done|accepted|already set|set to|captured/i.test(clean)) {
+    return { type: 'ok', label: 'Success', message: clean };
+  }
+  if (/waiting|fetching|locating|opening|uploading|starting/i.test(clean)) {
+    return { type: 'wait', label: 'Progress', message: clean };
+  }
+  if (/rate card|card\s+\d+|results detected|results located|scraped/i.test(clean)) {
+    return { type: 'card', label: 'Rates', message: clean };
+  }
+  if (/row\s+\d+/i.test(clean)) {
+    return { type: 'system', label: 'Job', message: clean };
+  }
+  return { type: type === 'info' ? 'system' : type, label: 'Info', message: clean };
+}
+
 function startCapture() {
   const timeout = parseInt(val('f-timeout')) || 900;
   clearRunState();
+  startRun('manual', 'Manual capture running', `Timeout ${timeout}s`);
   setBusy(true);
   setStatus('running', 'Opening Kappal...');
   log('Opening Kappal browser session.', 'info');
@@ -611,6 +1272,7 @@ function startCapture() {
   ws.onerror = () => {
     log('Connection failed.', 'err');
     setStatus('error', 'Connection failed');
+    finishRun(0, false);
     setBusy(false);
   };
 
@@ -618,6 +1280,7 @@ function startCapture() {
     if (document.getElementById('status-dot').className.includes('running')) {
       log('Connection closed unexpectedly.', 'err');
       setStatus('error', 'Connection closed');
+      finishRun(0, false);
       setBusy(false);
     }
   };
@@ -631,6 +1294,7 @@ async function startBatch() {
   }
 
   clearRunState();
+  startRun('batch', 'Batch auto-search running', input.files[0].name);
   setBusy(true);
   setStatus('running', 'Uploading batch workbook...');
   log('Uploading batch workbook.', 'info');
@@ -648,6 +1312,7 @@ async function startBatch() {
   if (!uploadResponse.ok) {
     log(`Batch upload failed: ${upload.error || 'unknown error'}`, 'err');
     setStatus('error', 'Batch upload failed');
+    finishRun(0, false);
     setBusy(false);
     return;
   }
@@ -668,6 +1333,7 @@ async function startBatch() {
   ws.onerror = () => {
     log('Batch connection failed.', 'err');
     setStatus('error', 'Batch connection failed');
+    finishRun(0, false);
     setBusy(false);
   };
 
@@ -675,6 +1341,7 @@ async function startBatch() {
     if (document.getElementById('status-dot').className.includes('running')) {
       log('Batch connection closed unexpectedly.', 'err');
       setStatus('error', 'Batch connection closed');
+      finishRun(0, false);
       setBusy(false);
     }
   };
@@ -692,7 +1359,7 @@ function handleMessage(message) {
     const count = message.data.total_results || 0;
     log(`Done. ${count} result(s) captured.`, 'ok');
     setStatus('done', `Captured ${count} rate(s)`);
-    showJSON(message.data);
+    finishRun(count, true);
     showDownloads(count);
     setBusy(false);
     return;
@@ -701,6 +1368,7 @@ function handleMessage(message) {
   if (message.type === 'error') {
     log(`Error: ${message.message}`, 'err');
     setStatus('error', 'Capture failed');
+    finishRun(0, false);
     setBusy(false);
   }
 }
@@ -720,38 +1388,40 @@ function setBusy(isBusy) {
 
 function clearRunState() {
   lastResult = null;
-  document.getElementById('json-output').className = '';
-  document.getElementById('json-output').innerHTML = '';
-  document.getElementById('json-empty').style.display = 'flex';
+  if (runTimer) clearInterval(runTimer);
+  runTimer = null;
+  runStartedAt = null;
+  runState = { totalJobs: 0, currentJob: 0, cards: 0, results: 0, mode: 'idle' };
   document.getElementById('result-count').className = 'count-pill';
   document.getElementById('metric-rates').textContent = '0';
   document.getElementById('json-btn').className = 'download';
   document.getElementById('excel-btn').className = 'download excel';
+  document.getElementById('export-count').textContent = '0';
+  document.getElementById('export-status').textContent = 'Exports will be available after a successful capture.';
   document.getElementById('log-area').innerHTML = '';
+  document.getElementById('run-title').textContent = 'Preparing session';
+  document.getElementById('run-subtitle').textContent = 'Waiting for browser connection';
+  document.getElementById('run-clock').textContent = '00:00';
+  document.getElementById('stat-elapsed').textContent = '00:00';
+  document.getElementById('progress-fill').style.width = '0%';
+  updateRunStats();
+}
+
+function clearLog() {
+  document.getElementById('log-area').innerHTML =
+    '<div class="line system"><span class="time"></span><span class="level">System</span><span class="msg">Activity log cleared.</span></div>';
 }
 
 function showDownloads(count) {
   document.getElementById('metric-rates').textContent = String(count);
+  document.getElementById('export-count').textContent = String(count);
+  document.getElementById('export-status').textContent =
+    count ? 'Download the completed rate output.' : 'Capture completed with no rates available.';
   const pill = document.getElementById('result-count');
   pill.textContent = `${count} results`;
   pill.className = 'count-pill visible';
   document.getElementById('json-btn').className = 'download visible';
   document.getElementById('excel-btn').className = 'download excel visible';
-}
-
-function showJSON(data) {
-  const raw = JSON.stringify(data, null, 2);
-  const highlighted = raw
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"([^"]+)":/g, '<span class="jk">"$1"</span>:')
-    .replace(/: "([^"]*)"/g, ': <span class="js">"$1"</span>')
-    .replace(/: (-?\d+\.?\d*)/g, ': <span class="jn">$1</span>')
-    .replace(/: (true|false|null)/g, ': <span class="jb">$1</span>');
-
-  const pre = document.getElementById('json-output');
-  pre.innerHTML = highlighted;
-  pre.className = 'visible';
-  document.getElementById('json-empty').style.display = 'none';
 }
 
 function downloadJSON() {

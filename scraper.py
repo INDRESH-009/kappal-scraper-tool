@@ -1047,7 +1047,6 @@ async def scrape_current_results_page(
         emit,
         quiet_seconds=quiet_seconds,
         max_seconds=max_seconds,
-        max_cards=count if count > 0 else None,
     )
 
 
@@ -1369,23 +1368,25 @@ async def _scrape_cards_as_they_load(
     results = []
     index = 0
     last_count = 0
+    last_reported_count = 0
     last_growth_at = asyncio.get_event_loop().time()
     deadline = last_growth_at + max_seconds
     last_status_at = 0
 
     while asyncio.get_event_loop().time() < deadline:
-        # If Kappal reported an authoritative result count, stop once we've hit it.
-        # This prevents scraping duplicate cards that appear in multiple UI sections.
-        if max_cards is not None and index >= max_cards:
-            await emit(f"✅ Scraped {len(results)} card(s) (matched reported count {max_cards}).")
-            return results
-
         visible_count = await _available_card_count(page)
+        reported_count = await _get_result_count(page)
+        loader_idle = await _results_loader_is_idle(page)
         now = asyncio.get_event_loop().time()
 
         # Cap visible_count at max_cards so the loop never runs past it.
         if max_cards is not None:
             visible_count = min(visible_count, max_cards)
+
+        if reported_count > last_reported_count:
+            last_reported_count = reported_count
+            last_growth_at = now
+            await emit(f"📦 Kappal has reported {reported_count} rate card(s) so far ...")
 
         if visible_count > last_count:
             last_count = visible_count
@@ -1398,13 +1399,29 @@ async def _scrape_cards_as_they_load(
             index += 1
             continue
 
-        if index > 0 and now - last_growth_at >= quiet_seconds and await _results_loader_is_idle(page):
-            await emit(f"✅ Card list stable for {quiet_seconds}s; scraped {len(results)} card(s).")
-            return results
+        if index > 0 and now - last_growth_at >= quiet_seconds and loader_idle:
+            if max_cards is not None and index < max_cards:
+                await emit(
+                    f"⏳ Kappal reported {max_cards} card(s); "
+                    f"waiting for remaining {max_cards - index} to become ready ..."
+                )
+                last_growth_at = now
+            else:
+                await emit(f"✅ Loader finished and card list stayed stable for {quiet_seconds}s; scraped {len(results)} card(s).")
+                return results
 
         if now - last_status_at >= 15:
             last_status_at = now
-            await emit(f"⏳ Waiting for more cards ... visible={visible_count}, scraped={index}")
+            if max_cards is not None:
+                await emit(
+                    f"⏳ Waiting for cards ... ready={visible_count}/{max_cards}, scraped={index}/{max_cards}"
+                )
+            else:
+                loader_state = "idle" if loader_idle else "loading"
+                await emit(
+                    f"⏳ Waiting for cards ... reported={reported_count}, "
+                    f"ready={visible_count}, scraped={index}, loader={loader_state}"
+                )
 
         await asyncio.sleep(2)
 
@@ -1455,9 +1472,9 @@ async def _available_card_count(page: Page) -> int:
     text_count = await _text_view_details_count(page)
     if text_count:
         return text_count
-    locator_count = await _view_details_buttons(page).count()
-    deep_count = await _deep_view_details_count(page)
-    return max(locator_count, deep_count)
+    if not await _results_loader_is_idle(page):
+        return 0
+    return await _deep_view_details_count(page)
 
 
 async def _results_loader_is_idle(page: Page) -> bool:
@@ -1480,12 +1497,26 @@ async def _results_loader_is_idle(page: Page) -> bool:
                     '.loader-spin',
                     '.md-mode-indeterminate',
                     'md-progress-linear',
+                    'md-progress-linear *',
                     '.progress-linear',
                     '[class*="progress"]',
                     '[class*="loader"]',
                     '[class*="loading"]'
                 ];
-                return !loaderSelectors.some(sel => Array.from(document.querySelectorAll(sel)).some(visible));
+                const selectorLoader = loaderSelectors.some(sel => Array.from(document.querySelectorAll(sel)).some(visible));
+                const topBlueLoader = Array.from(document.querySelectorAll('div, span, md-progress-linear, md-progress-linear *'))
+                    .some(el => {
+                        if (!visible(el)) return false;
+                        const style = getComputedStyle(el);
+                        const rect = el.getBoundingClientRect();
+                        const bg = style.backgroundColor || '';
+                        const isTopBar = rect.top >= -2 && rect.top <= 180 && rect.height >= 2 && rect.height <= 10 && rect.width >= 120;
+                        const looksBlue = /rgb\\(33,\\s*150,\\s*243\\)|rgb\\(25,\\s*118,\\s*210\\)|rgb\\(59,\\s*130,\\s*246\\)|rgb\\(37,\\s*99,\\s*235\\)/.test(bg);
+                        const animated = style.transform !== 'none' || style.animationName !== 'none' || style.transitionProperty !== 'all';
+                        return isTopBar && (looksBlue || animated);
+                    });
+                const fetchingText = /Fetching\\s+in\\s+progress/i.test(document.body?.innerText || '');
+                return !(selectorLoader || topBlueLoader || fetchingText);
             }
             """
         ))
@@ -1513,6 +1544,15 @@ async def _text_view_details_count(page: Page) -> int:
                     && Number(style.opacity || 1) > 0.05
                     && rect.width > 0
                     && rect.height > 0;
+            };
+            const enabled = (el) => {
+                if (!el) return false;
+                const style = getComputedStyle(el);
+                const cls = String(el.className || '').toLowerCase();
+                return !el.disabled
+                    && el.getAttribute('aria-disabled') !== 'true'
+                    && !cls.includes('disabled')
+                    && style.pointerEvents !== 'none';
             };
             const clickableAncestor = (el) => {
                 let cur = el;
@@ -1571,7 +1611,7 @@ async def _text_view_details_count(page: Page) -> int:
                 if (/^View\\s+Details$/i.test(text) && visible(node)) {
                     const target = clickableAncestor(node);
                     const key = target ? cardKey(target) : '';
-                    if (target && visible(target) && key && !seen.has(key)) {
+                    if (target && visible(target) && enabled(target) && key && !seen.has(key)) {
                         seen.add(key);
                         found.push(target);
                     }
@@ -1593,10 +1633,27 @@ async def _deep_view_details_count(page: Page) -> int:
         """
         () => {
             const els = [];
+            const visible = (el) => {
+                const rect = el.getBoundingClientRect();
+                const style = getComputedStyle(el);
+                return style.visibility !== 'hidden'
+                    && style.display !== 'none'
+                    && Number(style.opacity || 1) > 0.05
+                    && rect.width > 0
+                    && rect.height > 0;
+            };
+            const enabled = (el) => {
+                const style = getComputedStyle(el);
+                const cls = String(el.className || '').toLowerCase();
+                return !el.disabled
+                    && el.getAttribute('aria-disabled') !== 'true'
+                    && !cls.includes('disabled')
+                    && style.pointerEvents !== 'none';
+            };
             const visit = (node) => {
                 if (!node || node.nodeType !== Node.ELEMENT_NODE) return;
                 const text = (node.innerText || node.textContent || '').trim();
-                if (/^View\\s+Details$/i.test(text)) els.push(node);
+                if (/^View\\s+Details$/i.test(text) && visible(node) && enabled(node)) els.push(node);
                 if (node.shadowRoot) for (const child of node.shadowRoot.children || []) visit(child);
                 for (const child of node.children || []) visit(child);
             };
@@ -1612,10 +1669,27 @@ async def _deep_click_view_details(page: Page, index: int):
         """
         (index) => {
             const els = [];
+            const visible = (el) => {
+                const rect = el.getBoundingClientRect();
+                const style = getComputedStyle(el);
+                return style.visibility !== 'hidden'
+                    && style.display !== 'none'
+                    && Number(style.opacity || 1) > 0.05
+                    && rect.width > 0
+                    && rect.height > 0;
+            };
+            const enabled = (el) => {
+                const style = getComputedStyle(el);
+                const cls = String(el.className || '').toLowerCase();
+                return !el.disabled
+                    && el.getAttribute('aria-disabled') !== 'true'
+                    && !cls.includes('disabled')
+                    && style.pointerEvents !== 'none';
+            };
             const visit = (node) => {
                 if (!node || node.nodeType !== Node.ELEMENT_NODE) return;
                 const text = (node.innerText || node.textContent || '').trim();
-                if (/^View\\s+Details$/i.test(text)) els.push(node);
+                if (/^View\\s+Details$/i.test(text) && visible(node) && enabled(node)) els.push(node);
                 if (node.shadowRoot) for (const child of node.shadowRoot.children || []) visit(child);
                 for (const child of node.children || []) visit(child);
             };
@@ -1647,6 +1721,15 @@ async def _click_view_details(page: Page, index: int):
                     && rect.width > 0
                     && rect.height > 0;
             };
+            const enabled = (el) => {
+                if (!el) return false;
+                const style = getComputedStyle(el);
+                const cls = String(el.className || '').toLowerCase();
+                return !el.disabled
+                    && el.getAttribute('aria-disabled') !== 'true'
+                    && !cls.includes('disabled')
+                    && style.pointerEvents !== 'none';
+            };
             const clickableAncestor = (el) => {
                 let cur = el;
                 while (cur && cur !== document.documentElement) {
@@ -1704,7 +1787,7 @@ async def _click_view_details(page: Page, index: int):
                 if (/^View\\s+Details$/i.test(text) && visible(node)) {
                     const target = clickableAncestor(node);
                     const key = target ? cardKey(target) : '';
-                    if (target && visible(target) && key && !seen.has(key)) {
+                    if (target && visible(target) && enabled(target) && key && !seen.has(key)) {
                         seen.add(key);
                         found.push(target);
                     }
