@@ -1561,7 +1561,6 @@ async def _extract_modal(page: Page) -> dict:
     await _click_tab(modal, "Schedule")
     await asyncio.sleep(0.3)
     schedule = await _extract_schedule_tab(modal)
-    charges = _prefer_clean_charge_rows(charges, schedule)
 
     # Free Days tab
     await _click_tab(modal, "Free Days")
@@ -1581,8 +1580,10 @@ async def _extract_modal_header(modal: Locator) -> dict:
     result = {
         "port_of_origin":             None,
         "port_of_loading":            None,
+        "port_of_loading_name":       None,
         "transshipment_port":         None,
         "port_of_discharge":          None,
+        "port_of_discharge_name":     None,
         "carrier":                    None,
         "service_name":               None,
         "service_type":               None,
@@ -1595,6 +1596,8 @@ async def _extract_modal_header(modal: Locator) -> dict:
         "commodity":                  None,
         "total_cost":                 None,
         "freight_subtotal":           None,
+        "valid_from":                 None,
+        "valid_to":                   None,
     }
     try:
         # Go back to Charges tab first so header is fully rendered
@@ -1606,8 +1609,10 @@ async def _extract_modal_header(modal: Locator) -> dict:
 
         result["port_of_origin"] = _port_code(fields.get("Port of Origin"))
         result["port_of_loading"] = _port_code(fields.get("Port of Loading"))
+        result["port_of_loading_name"] = _port_name(fields.get("Port of Loading"))
         result["transshipment_port"] = _port_code(fields.get("Via") or fields.get("V/S"))
         result["port_of_discharge"] = _port_code(fields.get("Port Of Discharge"))
+        result["port_of_discharge_name"] = _port_name(fields.get("Port Of Discharge"))
         result["carrier"] = fields.get("Liner/Carrier")
         result["service_type"] = fields.get("Service Type")
         result["origin_service_mode"] = _dash_to_none(fields.get("Origin Service mode"))
@@ -1617,6 +1622,9 @@ async def _extract_modal_header(modal: Locator) -> dict:
         result["incoterms"] = _dash_to_none(fields.get("Incoterms"))
         result["cargo_type"] = _dash_to_none(fields.get("Cargo Type"))
         result["commodity"] = _dash_to_none(fields.get("Commodity"))
+        valid_from, valid_to = _effective_period_dates(fields.get("Effective Period"))
+        result["valid_from"] = valid_from
+        result["valid_to"] = valid_to
 
         # Sailing date
         m = re.search(r"(\d{2}\s+[A-Za-z]{3}\s+\d{4})", text)
@@ -1708,95 +1716,315 @@ def _port_code(value: Optional[str]) -> Optional[str]:
     return match.group(1) if match else value.strip()
 
 
+def _port_name(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    cleaned = value.strip()
+    if "/" in cleaned:
+        name = cleaned.split("/", 1)[1].strip()
+        return name if _looks_like_port_name(name) else None
+    without_code = re.sub(r"\b[A-Z]{5}\b", "", cleaned).strip(" -/")
+    return without_code if _looks_like_port_name(without_code) else None
+
+
+def _looks_like_port_name(value: Optional[str]) -> bool:
+    name = (value or "").strip()
+    if not name:
+        return False
+    if re.fullmatch(r"S\s+[A-Z]{5}", name):
+        return False
+    if re.fullmatch(r"[A-Z]{5}", name):
+        return False
+    return True
+
+
+def _effective_period_dates(value: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    if not value:
+        return None, None
+    dates = re.findall(r"\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}|\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{4}", value)
+    if len(dates) >= 2:
+        return dates[0], dates[1]
+    if len(dates) == 1:
+        return dates[0], None
+    return None, None
+
+
 async def _extract_charges_tab(modal: Locator) -> dict:
     """
-    Returns:
-    {
-      freight:     { subtotal: {currency, amount}, line_items: [...] },
-      origin:      { subtotal: {currency, amount}, line_items: [...] },
-      destination: { subtotal: {currency, amount}, line_items: [...] },
-    }
-    Each line_item: { name, basis, equipment_type, quantity, unit_price:{currency,amount}, amount:{currency,amount} }
+    Extracts charge line items grouped into freight / origin / destination.
+
+    Kappal renders each charge as a row of <input> elements (not <td>).
+    Section headers ("Freight", "Origin Charges", "Destination Charges") are
+    plain text nodes in separate container divs BEFORE their charge rows.
+
+    Strategy: traverse the modal DOM in document order. Track the current
+    section as we encounter section-header elements. Assign each charge row
+    to whichever section is active at that point.
     """
     sections = {
         "freight":     {"subtotal": None, "line_items": []},
         "origin":      {"subtotal": None, "line_items": []},
         "destination": {"subtotal": None, "line_items": []},
     }
-    current = "freight"
 
     try:
-        # Find all rows; detect section boundaries by header cells / section headings
-        rows = modal.locator("tr")
-        count = await rows.count()
-        if count == 0:
-            rows = modal.locator("[class*='row'], [layout='row']")
-            count = await rows.count()
+        js_result = await modal.evaluate("""
+            (modalEl) => {
+                const txt   = el => el ? (el.innerText || el.textContent || '').trim() : '';
+                const val   = el => el ? (el.value   || el.innerText || el.textContent || '').trim() : '';
 
-        for i in range(count):
-            row = rows.nth(i)
-            row_text = (await row.inner_text()).strip()
-            row_text = re.sub(r"\s+", " ", row_text)
+                // ── Identify visible section boundaries by vertical position ─
+                const allElements = Array.from(modalEl.querySelectorAll('*'));
 
-            # Section header detection
-            row_lower = row_text.lower()
-            if re.search(r"\borigin\s+charges?\b", row_lower):
-                current = "origin"
-                # Try to grab subtotal from same row
-                m = re.search(r"([A-Z]{3})\s*([\d,]+\.?\d*)", row_text)
-                if m:
-                    sections[current]["subtotal"] = {
-                        "currency": m.group(1), "amount": float(m.group(2).replace(",", ""))
+                const isSectionHeader = (el) => {
+                    if (el.querySelectorAll('input').length > 0) return null;
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width <= 0 || rect.height <= 0 || rect.height > 140) return null;
+                    const t = txt(el).replace(/\\s+/g, ' ').trim();
+                    if (!t || t.length > 160) return null;
+                    if (/^freight(?:\\s+sub\\s*total\\b.*)?$/i.test(t)) return 'freight';
+                    if (/^origin\\s+charges?(?:\\s+sub\\s*total\\b.*)?$/i.test(t)) return 'origin';
+                    if (/^destination\\s+charges?(?:\\s+sub\\s*total\\b.*)?$/i.test(t)) return 'destination';
+                    return null;
+                };
+
+                const boundaries = [];
+                for (const el of allElements) {
+                    const sec = isSectionHeader(el);
+                    if (!sec) continue;
+                    const rect = el.getBoundingClientRect();
+                    boundaries.push({el, sec, top: rect.top});
+                }
+                boundaries.sort((a, b) => a.top - b.top);
+
+                const deduped = [];
+                for (const boundary of boundaries) {
+                    const prev = deduped[deduped.length - 1];
+                    if (prev && prev.sec === boundary.sec && Math.abs(prev.top - boundary.top) < 8) continue;
+                    deduped.push(boundary);
+                }
+
+                // Subtotals: look for "Sub Total USD 3,233.00" patterns near each header
+                const subtotals = {};
+                for (const {el, sec} of deduped) {
+                    const parent = el.closest('[class]') || el.parentElement;
+                    if (parent) {
+                        const pt = parent.innerText || '';
+                        const m = pt.match(/Sub\\s*Total[^A-Z]*([A-Z]{3})\\s*([\\d,]+\\.\\d+)/i);
+                        if (m && !subtotals[sec])
+                            subtotals[sec] = {currency: m[1], amount: parseFloat(m[2].replace(/,/g,''))};
                     }
-                continue
-            if re.search(r"\bdestination\s+charges?\b", row_lower):
-                current = "destination"
-                m = re.search(r"([A-Z]{3})\s*([\d,]+\.?\d*)", row_text)
-                if m:
-                    sections[current]["subtotal"] = {
-                        "currency": m.group(1), "amount": float(m.group(2).replace(",", ""))
+                }
+
+                const getSectionFor = (el) => {
+                    let current = 'freight';
+                    const rowTop = el.getBoundingClientRect().top;
+                    for (const {sec, top} of deduped) {
+                        if (top <= rowTop + 2) current = sec;
                     }
-                continue
-            if re.search(r"\bfreight\b", row_lower) and "sub" not in row_lower and i < 5:
-                current = "freight"
-                continue
+                    return current;
+                };
 
-            # Sub-total row
-            if re.search(r"\bsub\s*total\b", row_lower, re.I):
-                m = re.search(r"([A-Z]{3})\s*([\d,]+\.?\d*)", row_text)
-                if m:
-                    sections[current]["subtotal"] = {
-                        "currency": m.group(1), "amount": float(m.group(2).replace(",", ""))
+                // ── Extract charge rows ────────────────────────────────────
+                const isChargeName = (v) => {
+                    if (!v || v.length < 4) return false;
+                    if (/^[A-Z]{3}$/.test(v)) return false;
+                    if (/^[\\d,\\.]+$/.test(v)) return false;
+                    if (/^\\d{2}(GP|HC|HQ|DV|RF|OT|RE)/i.test(v)) return false;
+                    if (/^\\d+\\.\\d+$/.test(v)) return false;
+                    if (/^(per |per$)/i.test(v)) return false;
+                    if (/^(charges|basis|equipment type|amount|comments|quantity|sub total|total cost)/i.test(v)) return false;
+                    return true;
+                };
+
+                const sections = {freight: [], origin: [], destination: []};
+                const visitedRows = new Set();
+
+                for (const inp of modalEl.querySelectorAll('input')) {
+                    const v = val(inp);
+                    if (!isChargeName(v)) continue;
+
+                    // Walk up to find the row container
+                    let row = inp.parentElement;
+                    for (let i = 0; i < 8 && row; i++) {
+                        const rowInputs = row.querySelectorAll('input');
+                        const rt = txt(row);
+                        if (rowInputs.length >= 2 && /\\bper\\b/i.test(rt) && /[A-Z]{3}/.test(rt)) break;
+                        row = row.parentElement;
                     }
-                continue
+                    if (!row || visitedRows.has(row)) continue;
+                    visitedRows.add(row);
 
-            # Data row – must have at least 4 cells
-            cells = row.locator("td")
-            cell_count = await cells.count()
-            if cell_count < 4:
-                continue
+                    const section = getSectionFor(row);
+                    if (!sections[section]) continue;
 
-            name = (await cells.nth(0).inner_text()).strip()
-            if not name or name.lower() in ("charges", "name"):
-                continue  # skip header rows
+                    // Read inputs
+                    const rowInputs = Array.from(row.querySelectorAll('input'));
+                    const inputVals = rowInputs.map(i => val(i)).filter(Boolean);
 
-            item = {
-                "name":           name,
-                "basis":          (await cells.nth(1).inner_text()).strip() if cell_count > 1 else None,
-                "equipment_type": (await cells.nth(2).inner_text()).strip() if cell_count > 2 else None,
-                "quantity":       (await cells.nth(3).inner_text()).strip() if cell_count > 3 else None,
-                "unit_price":     _parse_amount(await cells.nth(4).inner_text() if cell_count > 4 else ""),
-                "amount":         _parse_amount(await cells.nth(5).inner_text() if cell_count > 5 else ""),
+                    const basis = inputVals.find(x => /\\bper\\b/i.test(x)) || null;
+
+                    let equip = null;
+                    for (const s of row.querySelectorAll('select')) {
+                        const sv = txt(s);
+                        if (/^\\d{2}(GP|HC|HQ|DV|RF|OT|RE)/i.test(sv)) { equip = sv; break; }
+                    }
+                    if (!equip) equip = inputVals.find(x => /^\\d{2}(GP|HC|HQ|DV|RF|OT|RE)/i.test(x)) || null;
+
+                    const qty = inputVals.find(x => /^\\d+\\.\\d+$/.test(x)) || null;
+
+                    // Money pairs: find currency-code leaves, then adjacent amount
+                    const moneyPairs = [];
+                    for (const cEl of row.querySelectorAll('*')) {
+                        const ct = txt(cEl);
+                        if (!/^[A-Z]{3}$/.test(ct) || cEl.children.length > 0) continue;
+                        const candidates = [
+                            cEl.nextElementSibling,
+                            cEl.parentElement && cEl.parentElement.nextElementSibling,
+                        ].filter(Boolean);
+                        for (const c of candidates) {
+                            const amtEl = c.querySelector('input') || c;
+                            const amtRaw = val(amtEl);
+                            if (/^[\\d,]+\\.\\d+$/.test(amtRaw)) {
+                                moneyPairs.push({currency: ct, amount: parseFloat(amtRaw.replace(/,/g,''))});
+                                break;
+                            }
+                        }
+                    }
+                    if (moneyPairs.length === 0) {
+                        const amtInputs = rowInputs.filter(i => {
+                            const av = val(i);
+                            return /^[\\d,]+\\.\\d+$/.test(av) && parseFloat(av.replace(/,/g,'')) > 0;
+                        });
+                        for (const ai of amtInputs)
+                            moneyPairs.push({currency: null, amount: parseFloat(val(ai).replace(/,/g,''))});
+                    }
+
+                    const name = v.replace(/\\s+\\d{2}(GP|HC|HQ|DV|RF|OT|RE)\\s*$/i, '').trim();
+
+                    sections[section].push({name, basis, equipment_type: equip, quantity: qty,
+                        unit_price: moneyPairs[0] || null,
+                        amount:     moneyPairs[moneyPairs.length - 1] || null});
+                }
+
+                return {sections, subtotals, boundaries: deduped.map(b => ({section: b.sec, top: b.top}))};
             }
-            sections[current]["line_items"].append(item)
+        """)
 
-        if not any(section["line_items"] for section in sections.values()):
-            sections = _extract_charges_from_text(await modal.inner_text(), sections)
+        if js_result and js_result.get("sections"):
+            for sec in ("freight", "origin", "destination"):
+                sections[sec]["line_items"] = js_result["sections"].get(sec) or []
+            for sec, sub in (js_result.get("subtotals") or {}).items():
+                if sec in sections and sub:
+                    sections[sec]["subtotal"] = sub
+
+        _sanitize_charge_sections(sections)
+
+        modal_text = await modal.inner_text()
+        parsed = _extract_charges_from_text(
+            modal_text,
+            {
+                "freight": {"subtotal": None, "line_items": []},
+                "origin": {"subtotal": None, "line_items": []},
+                "destination": {"subtotal": None, "line_items": []},
+            },
+        )
+        for sec in ("freight", "origin", "destination"):
+            parsed_items = parsed.get(sec, {}).get("line_items") or []
+            if parsed_items:
+                sections[sec]["line_items"] = parsed_items
+                sections[sec]["subtotal"] = sections[sec]["subtotal"] or parsed[sec].get("subtotal")
+
+        _sanitize_charge_sections(sections)
+        _dedupe_charge_sections(sections)
 
     except Exception as e:
         sections["_error"] = str(e)
 
     return sections
+
+
+def _section_header_present(text: str, section: str) -> bool:
+    if section == "origin":
+        return bool(re.search(r"\borigin\s+charges?\b", text or "", re.I))
+    if section == "destination":
+        return bool(re.search(r"\bdestination\s+charges?\b", text or "", re.I))
+    return bool(re.search(r"\bfreight\b", text or "", re.I))
+
+
+def _dedupe_charge_sections(sections: dict) -> None:
+    non_freight_names = {
+        _charge_identity(item)
+        for sec in ("origin", "destination")
+        for item in sections.get(sec, {}).get("line_items", [])
+        if _charge_identity(item)
+    }
+    if not non_freight_names:
+        return
+    freight = sections.get("freight", {})
+    freight["line_items"] = [
+        item for item in freight.get("line_items", [])
+        if _charge_identity(item) not in non_freight_names
+    ]
+
+
+def _charge_identity(item: dict) -> str:
+    name = (item or {}).get("name") or ""
+    return re.sub(r"\s+", " ", name).strip().lower()
+
+
+def _sanitize_charge_sections(sections: dict) -> None:
+    for sec in ("freight", "origin", "destination"):
+        section = sections.get(sec)
+        if not isinstance(section, dict):
+            continue
+        cleaned = []
+        seen = set()
+        for item in section.get("line_items") or []:
+            name = _clean_charge_name((item or {}).get("name"))
+            if not _looks_like_charge_name(name):
+                continue
+            item["name"] = name
+            ident = _charge_identity(item)
+            if ident in seen:
+                continue
+            seen.add(ident)
+            cleaned.append(item)
+        section["line_items"] = cleaned
+
+
+def _clean_charge_name(value: Optional[str]) -> str:
+    name = str(value or "").replace("\t", " ")
+    name = re.sub(r"\s+", " ", name).strip()
+    return name
+
+
+def _looks_like_charge_name(value: Optional[str]) -> bool:
+    name = _clean_charge_name(value)
+    low = name.lower()
+    if not name or low in {"undefined", "free days", "total"}:
+        return False
+    if "\t" in str(value or ""):
+        return False
+    if len(name) < 4 or len(name) > 90:
+        return False
+    if not re.search(r"[A-Za-z]", name):
+        return False
+    if re.fullmatch(r"[A-Z]{3}", name):
+        return False
+    if re.fullmatch(r"[\d,]+(?:\.\d+)?", name):
+        return False
+    if re.fullmatch(r"\d{2}\s*(GP|HC|HQ|DV|RF|OT|RE)", name, re.I):
+        return False
+    if re.fullmatch(r"\d+(?:\.\d+)?", name):
+        return False
+    if re.fullmatch(r"per(?:\s+\w+){0,3}", name, re.I):
+        return False
+    if low in {"charges", "basis", "equipment type", "quantity", "quantity | slab", "unit price", "amount", "comments", "sub total", "total cost"}:
+        return False
+    if "basis equipment type" in low or "unit price amount" in low:
+        return False
+    return True
 
 
 def _extract_charges_from_text(text: str, sections: dict) -> dict:
@@ -1819,35 +2047,47 @@ def _extract_charges_from_text(text: str, sections: dict) -> dict:
                 sections[current]["subtotal"] = amount
             continue
 
-        joined = " ".join(lines[i:i + 8])
-        if not re.search(r"\b(USD|INR|EUR)\b", joined):
+        if not _looks_like_charge_name(line):
+            continue
+
+        window = _charge_line_window(lines, i)
+        joined = " ".join(window)
+        if not re.search(r"\b[A-Z]{3}\b", joined):
             continue
         if not re.search(r"\b(per equipment|per b/l|per bl|per document|per shipment)\b", joined, re.I):
             continue
-        if line.lower() in {"charges", "basis", "equipment type", "amount", "comments"}:
-            continue
 
-        item = _parse_charge_line_window(lines[i:i + 10])
+        item = _parse_charge_line_window(window)
         if item and item["name"] not in {x["name"] for x in sections[current]["line_items"]}:
             sections[current]["line_items"].append(item)
 
     return sections
 
 
+def _charge_line_window(lines: list[str], start: int) -> list[str]:
+    window = [lines[start]]
+    for line in lines[start + 1:start + 24]:
+        low = line.lower()
+        if low == "freight" or "origin charges" in low or "destination charges" in low:
+            break
+        if len(window) >= 7 and _looks_like_charge_name(line):
+            break
+        window.append(line)
+    return window
+
+
 def _parse_charge_line_window(lines: list[str]) -> Optional[dict]:
-    name = lines[0]
+    name = _clean_charge_name(lines[0])
+    if not _looks_like_charge_name(name):
+        return None
     basis = next((x for x in lines if re.search(r"\bper\b", x, re.I)), None)
-    equipment = next((x for x in lines if re.fullmatch(r"\d{2}(GP|HC|HQ|DV|RF)", x, re.I)), None)
+    equipment = next((x for x in lines if re.fullmatch(r"\d{2}\s*(GP|HC|HQ|DV|RF|OT|RE)", x, re.I)), None)
     quantity = next((x for x in lines if re.fullmatch(r"\d+(\.\d+)?", x)), None)
     amounts = []
     for i, line in enumerate(lines):
-        if re.fullmatch(r"[A-Z]{3}", line) and i + 1 < len(lines):
+        if re.fullmatch(r"[A-Z]{3}", line.strip()) and i + 1 < len(lines):
             amount_text = f"{line} {lines[i + 1]}"
             amount = _parse_amount(amount_text)
-            if amount:
-                amounts.append(amount)
-        else:
-            amount = _parse_amount(line)
             if amount:
                 amounts.append(amount)
     if not amounts:
@@ -1862,37 +2102,6 @@ def _parse_charge_line_window(lines: list[str]) -> Optional[dict]:
     }
 
 
-def _prefer_clean_charge_rows(charges: dict, rows: list[dict]) -> dict:
-    clean_items = []
-    for row in rows or []:
-        name = (row.get("Charges") or "").strip()
-        if not name or name.lower() in {"charges", "total", "sub total"}:
-            continue
-        amount = _parse_amount(row.get("Amount") or "")
-        unit_price = _parse_amount(row.get("Unit Price") or "")
-        if not amount and not unit_price:
-            continue
-        clean_items.append({
-            "name": name,
-            "basis": _blank_to_none(row.get("Basis")),
-            "equipment_type": _blank_to_none(row.get("Equipment Type")),
-            "quantity": _blank_to_none(row.get("Quantity | Slab")),
-            "unit_price": unit_price,
-            "amount": amount or unit_price,
-            "comments": _blank_to_none(row.get("Comments")),
-        })
-
-    if not clean_items:
-        return charges
-
-    freight = charges.setdefault("freight", {"subtotal": None, "line_items": []})
-    freight["line_items"] = clean_items
-    total = clean_items[-1].get("amount")
-    if total:
-        freight["subtotal"] = total
-    return charges
-
-
 def _blank_to_none(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
@@ -1901,22 +2110,55 @@ def _blank_to_none(value: Optional[str]) -> Optional[str]:
 
 
 async def _extract_remarks_tab(modal: Locator) -> dict:
+    """
+    Reads only the Remarks and Inclusion text areas from the Remarks & Inclusions tab.
+    Uses JS to find the rich-text editor content directly instead of the full modal text.
+    """
     try:
-        text = await modal.inner_text()
-        # Split on "Inclusion" if present
-        parts = re.split(r"(?i)\bInclusion\b", text, maxsplit=1)
-        remarks_raw   = parts[0].strip() if parts else text.strip()
-        inclusions_raw = parts[1].strip() if len(parts) > 1 else ""
+        js_result = await modal.evaluate("""
+            (modalEl) => {
+                const txt = el => el ? (el.innerText || el.textContent || '').trim() : '';
 
-        # Clean up tab names from the text
-        for tab in ["Schedule", "Charges", "Remarks & Inclusions", "T&C", "Free Days"]:
-            remarks_raw   = remarks_raw.replace(tab, "").strip()
-            inclusions_raw = inclusions_raw.replace(tab, "").strip()
+                // The Remarks & Inclusions tab has two labelled sections:
+                // "Remarks" and "Inclusion" — each followed by a rich-text editor div.
+                // We find the label, then grab the next sibling editor's text.
+                const getSection = (labelText) => {
+                    for (const el of modalEl.querySelectorAll('*')) {
+                        const t = txt(el);
+                        if (t === labelText && el.children.length === 0) {
+                            // Walk forward to find the editor container
+                            let sib = el.nextElementSibling || (el.parentElement && el.parentElement.nextElementSibling);
+                            for (let i = 0; i < 5 && sib; i++) {
+                                const st = txt(sib);
+                                if (st && st.length > 0 && sib !== el) return st;
+                                sib = sib.nextElementSibling;
+                            }
+                        }
+                    }
+                    return null;
+                };
+
+                // Also try: find all contenteditable or .ql-editor divs (Quill editor)
+                const editors = Array.from(modalEl.querySelectorAll(
+                    '[contenteditable="true"], .ql-editor, [class*="editor"], [class*="rich-text"]'
+                ));
+
+                let remarks = getSection('Remarks') || '';
+                let inclusions = getSection('Inclusion') || getSection('Inclusions') || '';
+
+                // Fallback: first editor = remarks, second = inclusions
+                if (!remarks && editors.length > 0) remarks = txt(editors[0]);
+                if (!inclusions && editors.length > 1) inclusions = txt(editors[1]);
+
+                return {remarks, inclusions};
+            }
+        """)
 
         return {
-            "remarks":    remarks_raw,
-            "inclusions": inclusions_raw,
+            "remarks":    (js_result.get("remarks")    or "").strip() or None,
+            "inclusions": (js_result.get("inclusions") or "").strip() or None,
         }
+
     except Exception as e:
         return {"_error": str(e)}
 

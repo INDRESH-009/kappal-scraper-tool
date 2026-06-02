@@ -10,6 +10,7 @@ FastAPI backend for kappal auto scrapper.
 
 import json
 import asyncio
+import re
 from io import BytesIO
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill
+from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 from pydantic import BaseModel
 
@@ -84,171 +85,402 @@ class ManualScrapeRequest(BaseModel):
     search_timeout: int = 600   # seconds to wait for the user to submit search
 
 
-RATE_COLUMNS = [
+# ─── Template column structure (matches Rate_Capture_Template.xlsx exactly) ──
+
+# Header color scheme (from template)
+COLOR_RED       = "DC2626"   # Required columns
+COLOR_NAVY      = "0D1B5E"   # Route metadata
+COLOR_BLUE      = "1E3A8A"   # FC (Freight Charges)
+COLOR_BROWN     = "92400E"   # OC (Origin Charges)
+COLOR_GREEN     = "065F46"   # DC (Destination Charges)
+COLOR_ROW_BG    = "F0F4FF"   # Alternating data row background
+
+# Required columns (red header)
+REQUIRED_COLS = {"Mode", "Shipping Line", "POL Code", "POD Code", "Valid From"}
+
+# Route metadata columns (first 22)
+ROUTE_COLS = [
     "Mode", "Rate Type", "Shipping Line", "Shipping Line Code", "Container Type",
     "Service Mode", "Service Name", "POL Code", "POL Name", "Origin Terminal",
-    "POD Code", "POD Name", "Destination Terminal", "Via Codes", "Transit Time",
-    "Sailing Date", "Effective Period", "Cargo Type", "Commodity", "Incoterms",
-    "Freight Currency", "Freight Rate", "Total Currency", "Total Rate",
-    "Remarks", "Inclusions", "Source URL",
+    "POD Code", "POD Name", "Destination Terminal", "Via Codes", "Via Names",
+    "Sailing Date", "Transit Days", "Free Days", "Cargo Type", "Cargo Description",
+    "Valid From", "Valid To",
 ]
 
-CHARGE_COLUMNS = [
-    "Rate Row", "Section", "Charge Name", "Basis", "Equipment Type", "Quantity",
-    "Unit Currency", "Unit Price", "Amount Currency", "Amount", "Comments",
-]
+# Build full 144-column header list
+def _build_header() -> list[str]:
+    headers = list(ROUTE_COLS)
+    for i in range(1, 7):   # FC1–FC6
+        for f in ("Name", "Code", "Basis", "Currency", "Amount"):
+            headers.append(f"FC{i} {f}")
+    for i in range(1, 10):  # OC1–OC9
+        for f in ("Name", "Code", "Basis", "Currency", "Amount"):
+            headers.append(f"OC{i} {f}")
+    for i in range(1, 10):  # DC1–DC9
+        for f in ("Name", "Code", "Basis", "Currency", "Amount"):
+            headers.append(f"DC{i} {f}")
+    headers.append("Inclusions")
+    headers.append("Remarks")
+    return headers
+
+HEADERS = _build_header()  # 144 columns
+
+
+def _header_color(col_name: str) -> str:
+    if col_name in REQUIRED_COLS:
+        return COLOR_RED
+    if col_name.startswith("FC"):
+        return COLOR_BLUE
+    if col_name.startswith("OC"):
+        return COLOR_BROWN
+    if col_name.startswith("DC"):
+        return COLOR_GREEN
+    return COLOR_NAVY
 
 
 def build_rates_workbook(payload: dict) -> Workbook:
     wb = Workbook()
     ws = wb.active
     ws.title = "Rates"
-    charges_ws = wb.create_sheet("Charges")
 
-    ws.append(RATE_COLUMNS)
-    charges_ws.append(CHARGE_COLUMNS)
+    # ── Write header row ──────────────────────────────────────────────────────
+    for col_idx, col_name in enumerate(HEADERS, start=1):
+        cell = ws.cell(row=1, column=col_idx, value=col_name)
+        cell.font = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+        cell.fill = PatternFill("solid", fgColor=_header_color(col_name))
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-    source_url = (payload.get("search_params") or {}).get("source_url")
-    for idx, rate in enumerate(payload.get("results") or [], start=1):
-        ws.append(rate_to_row(rate, source_url))
-        for charge in charge_rows(rate, idx):
-            charges_ws.append(charge)
+    # ── Write data rows ───────────────────────────────────────────────────────
+    exportable_rates = [rate for rate in payload.get("results") or [] if _is_exportable_rate(rate)]
+    for row_idx, rate in enumerate(exportable_rates, start=2):
+        row_data = _rate_to_template_row(rate)
+        use_bg = (row_idx % 2 == 0)
+        for col_idx, value in enumerate(row_data, start=1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=value)
+            cell.font = Font(name="Arial", size=10)
+            if use_bg:
+                cell.fill = PatternFill("solid", fgColor=COLOR_ROW_BG)
 
-    style_sheet(ws)
-    style_sheet(charges_ws)
+    # ── Column widths ─────────────────────────────────────────────────────────
+    col_widths = {
+        "Mode": 10, "Rate Type": 12, "Shipping Line": 18, "Shipping Line Code": 10,
+        "Container Type": 12, "Service Mode": 10, "Service Name": 14,
+        "POL Code": 9, "POL Name": 22, "Origin Terminal": 16,
+        "POD Code": 9, "POD Name": 22, "Destination Terminal": 16,
+        "Via Codes": 12, "Via Names": 18,
+        "Sailing Date": 13, "Transit Days": 11, "Free Days": 9,
+        "Cargo Type": 10, "Cargo Description": 16,
+        "Valid From": 12, "Valid To": 12,
+        "Inclusions": 30, "Remarks": 30,
+    }
+    for col_idx, col_name in enumerate(HEADERS, start=1):
+        letter = get_column_letter(col_idx)
+        width = col_widths.get(col_name, 13 if "Name" in col_name else 10)
+        ws.column_dimensions[letter].width = width
+
+    ws.row_dimensions[1].height = 36
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+
     return wb
 
 
-def rate_to_row(rate: dict, source_url: str | None) -> list:
-    total = amount_parts(rate.get("total_cost")) or amount_parts(rate.get("card_total_rate"))
-    freight = amount_parts(rate.get("freight_subtotal")) or amount_parts(rate.get("card_freight_rate"))
-    remarks = rate.get("remarks_and_inclusions") or {}
-    return [
+def _is_exportable_rate(rate: dict) -> bool:
+    if not isinstance(rate, dict) or rate.get("_error"):
+        return False
+    has_route = bool(
+        rate.get("carrier")
+        or rate.get("card_carrier")
+        or rate.get("port_of_loading")
+        or rate.get("port_of_origin")
+        or rate.get("port_of_discharge")
+    )
+    charges = rate.get("charges") or {}
+    has_charges = any(
+        _get_items(charges, section)
+        for section in ("freight", "origin", "destination")
+    )
+    return has_route or has_charges
+
+
+def _rate_to_template_row(rate: dict) -> list:
+    """Converts a scraped rate dict to the 144-column template row."""
+    charges     = rate.get("charges") or {}
+    freight_items   = _get_items(charges, "freight")
+    origin_items    = _get_items(charges, "origin")
+    dest_items      = _get_items(charges, "destination")
+    remarks_block   = rate.get("remarks_and_inclusions") or {}
+
+    # ── Sailing / validity dates ──────────────────────────────────────────────
+    sailing = rate.get("sailing_date") or rate.get("card_sailing_date") or ""
+
+    # Use the Effective Period parsed directly from the modal header first
+    valid_from = rate.get("valid_from") or _extract_valid_from(rate)
+    valid_to   = rate.get("valid_to")   or _extract_valid_to(rate)
+
+    # Normalise dates to YYYY-MM-DD
+    valid_from = _normalise_date(valid_from)
+    valid_to   = _normalise_date(valid_to)
+    sailing    = _normalise_date(sailing) or sailing  # keep original if parse fails
+
+    # ── Transit days (strip " Days" suffix) ──────────────────────────────────
+    transit_raw = rate.get("transit_time") or rate.get("card_transit_time") or ""
+    transit_days = re.search(r"\d+", str(transit_raw))
+    transit_days = int(transit_days.group()) if transit_days else None
+
+    # ── Route metadata (22 cols) ──────────────────────────────────────────────
+    carrier = rate.get("carrier") or rate.get("card_carrier") or ""
+    row = [
         "SEA-FCL",
         "SPOT RATE",
-        rate.get("carrier") or rate.get("card_carrier"),
-        carrier_code(rate.get("carrier") or rate.get("card_carrier")),
-        first_equipment_type(rate),
-        service_mode(rate),
+        carrier,
+        _carrier_code(carrier),
+        _container_type(rate),
+        _service_mode_str(rate),
         rate.get("service_name"),
         rate.get("port_of_loading") or rate.get("port_of_origin"),
-        port_name_from_raw(rate.get("remarks_and_inclusions", {}).get("remarks"), "Port of Loading"),
-        None,
+        _pol_name(rate),
+        None,                                              # Origin Terminal
         rate.get("port_of_discharge"),
-        port_name_from_raw(rate.get("remarks_and_inclusions", {}).get("remarks"), "Port Of Discharge"),
-        None,
+        _pod_name(rate),
+        None,                                              # Destination Terminal
         rate.get("transshipment_port"),
-        rate.get("transit_time") or rate.get("card_transit_time"),
-        rate.get("sailing_date"),
-        rate.get("card_sailing_date"),
-        rate.get("cargo_type") or rate.get("card_cargo_type"),
-        rate.get("commodity"),
-        rate.get("incoterms"),
-        freight[0],
-        freight[1],
-        total[0],
-        total[1],
-        remarks.get("remarks"),
-        remarks.get("inclusions"),
-        source_url,
+        None,                                              # Via Names
+        sailing or None,
+        transit_days,
+        None,                                              # Free Days
+        rate.get("cargo_type") or rate.get("card_cargo_type") or "FAK",
+        None,                                              # Cargo Description
+        valid_from,
+        valid_to,
+    ]
+
+    # ── FC1–FC6 (30 cols) ─────────────────────────────────────────────────────
+    for i in range(6):
+        row.extend(_charge_cols(freight_items, i))
+
+    # ── OC1–OC9 (45 cols) ────────────────────────────────────────────────────
+    for i in range(9):
+        row.extend(_charge_cols(origin_items, i))
+
+    # ── DC1–DC9 (45 cols) ────────────────────────────────────────────────────
+    for i in range(9):
+        row.extend(_charge_cols(dest_items, i))
+
+    # ── Inclusions, Remarks (2 cols) ─────────────────────────────────────────
+    row.append(remarks_block.get("inclusions") or None)
+    row.append(remarks_block.get("remarks") or None)
+
+    return row
+
+
+def _get_items(charges: dict, section: str) -> list:
+    sec = charges.get(section)
+    if not isinstance(sec, dict):
+        return []
+    items = []
+    seen = set()
+    for item in sec.get("line_items") or []:
+        name = _clean_charge_name((item or {}).get("name"))
+        if not _looks_like_charge_name(name):
+            continue
+        ident = name.lower()
+        if ident in seen:
+            continue
+        seen.add(ident)
+        item = dict(item)
+        item["name"] = name
+        items.append(item)
+    return items
+
+
+def _charge_cols(items: list, idx: int) -> list:
+    """Returns [Name, Code, Basis, Currency, Amount] for item at idx, or 5 Nones."""
+    if idx >= len(items):
+        return [None, None, None, None, None]
+    item = items[idx]
+    amt = _amount_parts(item.get("amount"))
+    return [
+        item.get("name"),
+        _charge_code(item.get("name")),
+        item.get("basis"),
+        amt[0],
+        amt[1],
     ]
 
 
-def charge_rows(rate: dict, rate_index: int) -> list:
-    rows = []
-    charges = rate.get("charges") or {}
-    for section_name, section in charges.items():
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+KNOWN_CARRIER_CODES = {
+    "oocl": "OOCL", "maersk": "MAEU", "msc": "MSCU",
+    "hapag": "HLCU", "one": "ONE", "cosco": "COSU",
+    "yang ming": "YMLU", "evergreen": "EGLV", "cma": "CMDU",
+    "zim": "ZIMU", "pil": "PABV", "wan hai": "WHLC",
+}
+
+KNOWN_CHARGE_CODES = {
+    "basic ocean freight": "BOF", "marine fuel recovery": "MFR",
+    "emergency fuel surcharge": "EFS", "carrier security surcharge": "CSS",
+    "security manifest document fee": "SMDF", "document charge": "DOC",
+    "export service fee": "ESF", "origin terminal handling charge": "OTHC",
+    "terminal handling charge": "THC", "destination terminal handling charge": "DTHC",
+    "ny pass through charge": "NYPT", "new york pass through": "NYPT",
+    "cfs fee": "CFS", "heavy weight fee": "HWF", "special dimension fee": "SDF",
+    "fuel bunker fee": "FBF", "terminal security charges": "TSC",
+    "equipment maintenance fee": "EMF", "isps": "ISPS",
+    "low sulphur surcharge": "LSS", "peak season surcharge": "PSS",
+    "congestion surcharge": "CGS", "war risk surcharge": "WRS",
+}
+
+KNOWN_PORT_NAMES = {
+    "AUMEL": "Melbourne",
+    "USNYC": "New York, NY",
+}
+
+
+def _carrier_code(name: str | None) -> str | None:
+    if not name:
+        return None
+    low = name.lower()
+    for key, code in KNOWN_CARRIER_CODES.items():
+        if key in low:
+            return code
+    return (name.split()[0].upper())[:6]
+
+
+def _charge_code(name: str | None) -> str | None:
+    if not name:
+        return None
+    cleaned = re.sub(r"\s+\d{2}(GP|HC|HQ|DV|RF|OT|RE)\s*$", "", name.strip(), flags=re.I)
+    paren_code = re.search(r"\(([A-Z]{2,6})\)", cleaned)
+    if paren_code:
+        return paren_code.group(1)
+    cleaned = re.sub(r"\s*\([^)]*\)", "", cleaned).strip().lower()
+    return KNOWN_CHARGE_CODES.get(cleaned)
+
+
+def _clean_charge_name(value: str | None) -> str:
+    name = str(value or "").replace("\t", " ")
+    return re.sub(r"\s+", " ", name).strip()
+
+
+def _looks_like_charge_name(value: str | None) -> bool:
+    name = _clean_charge_name(value)
+    low = name.lower()
+    if not name or low in {"undefined", "free days", "total"}:
+        return False
+    if len(name) < 4 or len(name) > 90:
+        return False
+    if not re.search(r"[A-Za-z]", name):
+        return False
+    if re.fullmatch(r"[A-Z]{3}", name):
+        return False
+    if re.fullmatch(r"[\d,]+(?:\.\d+)?", name):
+        return False
+    if re.fullmatch(r"\d{2}\s*(GP|HC|HQ|DV|RF|OT|RE)", name, re.I):
+        return False
+    if re.fullmatch(r"per(?:\s+\w+){0,3}", name, re.I):
+        return False
+    if low in {"charges", "basis", "equipment type", "quantity", "quantity | slab", "unit price", "amount", "comments", "sub total", "total cost"}:
+        return False
+    if "basis equipment type" in low or "unit price amount" in low:
+        return False
+    return True
+
+
+def _container_type(rate: dict) -> str | None:
+    for section in (rate.get("charges") or {}).values():
         if not isinstance(section, dict):
             continue
         for item in section.get("line_items") or []:
-            unit = amount_parts(item.get("unit_price"))
-            amount = amount_parts(item.get("amount"))
-            rows.append([
-                rate_index,
-                section_name,
-                item.get("name"),
-                item.get("basis"),
-                item.get("equipment_type"),
-                item.get("quantity"),
-                unit[0],
-                unit[1],
-                amount[0],
-                amount[1],
-                item.get("comments"),
-            ])
-    return rows
+            eq = item.get("equipment_type")
+            if eq:
+                return eq.upper()
+    return None
 
 
-def amount_parts(value) -> tuple:
+def _service_mode_str(rate: dict) -> str | None:
+    o = rate.get("origin_service_mode")
+    d = rate.get("destination_service_mode")
+    if o and d:
+        return f"{o}/{d}"
+    return rate.get("service_type") or rate.get("card_service_type")
+
+
+def _pol_name(rate: dict) -> str | None:
+    """Best-effort port of loading name from scraped data."""
+    name = rate.get("pol_name") or rate.get("port_of_loading_name")
+    if _looks_like_port_name(name):
+        return name
+    return KNOWN_PORT_NAMES.get(rate.get("port_of_loading") or rate.get("port_of_origin"))
+
+
+def _pod_name(rate: dict) -> str | None:
+    name = rate.get("pod_name") or rate.get("port_of_discharge_name")
+    if _looks_like_port_name(name):
+        return name
+    return KNOWN_PORT_NAMES.get(rate.get("port_of_discharge"))
+
+
+def _looks_like_port_name(value: str | None) -> bool:
+    name = (value or "").strip()
+    if not name:
+        return False
+    if re.fullmatch(r"S\s+[A-Z]{5}", name):
+        return False
+    if re.fullmatch(r"[A-Z]{5}", name):
+        return False
+    return True
+
+
+def _normalise_date(date_str: str | None) -> str | None:
+    """Converts '13 Jun 2026' or '2026-06-13' → '2026-06-13'. Returns None if unparseable."""
+    if not date_str:
+        return None
+    from datetime import datetime
+    for fmt in ("%d %b %Y", "%d %B %Y", "%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(date_str.strip(), fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+    return date_str  # return as-is if we can't parse
+
+
+def _extract_valid_from(rate: dict) -> str | None:
+    """Tries to pull a Valid From date from remarks or card fields."""
+    remarks = (rate.get("remarks_and_inclusions") or {}).get("remarks") or ""
+    m = re.search(r"(\d{2}\s+[A-Za-z]{3}\s+\d{4})", remarks)
+    if m:
+        try:
+            from datetime import datetime
+            return datetime.strptime(m.group(1), "%d %b %Y").strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    return None
+
+
+def _extract_valid_to(rate: dict) -> str | None:
+    remarks = (rate.get("remarks_and_inclusions") or {}).get("remarks") or ""
+    dates = re.findall(r"(\d{2}\s+[A-Za-z]{3}\s+\d{4})", remarks)
+    if len(dates) >= 2:
+        try:
+            from datetime import datetime
+            return datetime.strptime(dates[1], "%d %b %Y").strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    return None
+
+
+def _amount_parts(value) -> tuple:
     if isinstance(value, dict):
         return value.get("currency"), value.get("amount")
     if isinstance(value, (int, float)):
         return "USD", value
     if isinstance(value, str):
-        import re
-        match = re.search(r"([A-Z]{3})?\s*([\d,]+(?:\.\d+)?)", value)
-        if match:
-            return match.group(1), float(match.group(2).replace(",", ""))
+        m = re.search(r"([A-Z]{3})?\s*([\d,]+(?:\.\d+)?)", value)
+        if m:
+            return m.group(1), float(m.group(2).replace(",", ""))
     return None, None
-
-
-def first_equipment_type(rate: dict):
-    for section in (rate.get("charges") or {}).values():
-        if not isinstance(section, dict):
-            continue
-        for item in section.get("line_items") or []:
-            if item.get("equipment_type"):
-                return item["equipment_type"]
-    return None
-
-
-def service_mode(rate: dict):
-    if rate.get("origin_service_mode") and rate.get("destination_service_mode"):
-        return f"{rate['origin_service_mode']}/{rate['destination_service_mode']}"
-    return rate.get("service_type") or rate.get("card_service_type")
-
-
-def carrier_code(name: str | None):
-    if not name:
-        return None
-    known = {
-        "OOCL": "OOCL",
-        "ONE": "ONE",
-        "COSCO": "COSCO",
-        "Yang Ming": "YML",
-        "Hapag": "HLCU",
-        "Maersk": "MAEU",
-        "MSC": "MSCU",
-    }
-    for key, value in known.items():
-        if key.lower() in name.lower():
-            return value
-    return name.split()[0].upper()
-
-
-def port_name_from_raw(raw: str | None, label: str):
-    if not raw:
-        return None
-    lines = [line.strip() for line in raw.splitlines() if line.strip()]
-    for i, line in enumerate(lines):
-        if line.lower() == label.lower() and i + 1 < len(lines):
-            value = lines[i + 1]
-            return value.split("/", 1)[1] if "/" in value else value
-    return None
-
-
-def style_sheet(ws):
-    header_fill = PatternFill("solid", fgColor="0B1E63")
-    header_font = Font(color="FFFFFF", bold=True)
-    for cell in ws[1]:
-        cell.fill = header_fill
-        cell.font = header_font
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = ws.dimensions
-    for column in ws.columns:
-        max_len = max(len(str(cell.value or "")) for cell in column)
-        width = min(max(max_len + 2, 12), 50)
-        ws.column_dimensions[get_column_letter(column[0].column)].width = width
 
 
 @app.websocket("/ws/authenticate")
