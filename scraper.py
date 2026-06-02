@@ -105,7 +105,9 @@ async def manual_search_and_scrape_kappal(
 
             count = await _get_result_count(result_target)
             await emit(f"📦 {count} rate card(s) visible now – scraping as more load ...")
-            results = await _scrape_cards_as_they_load(result_target, emit)
+            results = await _scrape_cards_as_they_load(
+                result_target, emit, max_cards=count if count > 0 else None
+            )
 
             return {
                 "search_params": {"mode": "manual_site_search", "source_url": result_target.url},
@@ -1045,6 +1047,7 @@ async def scrape_current_results_page(
         emit,
         quiet_seconds=quiet_seconds,
         max_seconds=max_seconds,
+        max_cards=count if count > 0 else None,
     )
 
 
@@ -1356,7 +1359,13 @@ async def _scrape_all_cards(page: Page, total: int, emit) -> list:
     return results
 
 
-async def _scrape_cards_as_they_load(page: Page, emit, quiet_seconds: int = 45, max_seconds: int = 900) -> list:
+async def _scrape_cards_as_they_load(
+    page: Page,
+    emit,
+    quiet_seconds: int = 45,
+    max_seconds: int = 900,
+    max_cards: Optional[int] = None,
+) -> list:
     results = []
     index = 0
     last_count = 0
@@ -1365,8 +1374,18 @@ async def _scrape_cards_as_they_load(page: Page, emit, quiet_seconds: int = 45, 
     last_status_at = 0
 
     while asyncio.get_event_loop().time() < deadline:
+        # If Kappal reported an authoritative result count, stop once we've hit it.
+        # This prevents scraping duplicate cards that appear in multiple UI sections.
+        if max_cards is not None and index >= max_cards:
+            await emit(f"✅ Scraped {len(results)} card(s) (matched reported count {max_cards}).")
+            return results
+
         visible_count = await _available_card_count(page)
         now = asyncio.get_event_loop().time()
+
+        # Cap visible_count at max_cards so the loop never runs past it.
+        if max_cards is not None:
+            visible_count = min(visible_count, max_cards)
 
         if visible_count > last_count:
             last_count = visible_count
