@@ -1008,18 +1008,44 @@ async def _wait_for_results(page: Page, timeout: int = 25_000):
             const text = document.body?.innerText || '';
             const urlLooksLikeResults = /\\/rates\\/(fcl|lcl|air|land)\\//i.test(location.pathname);
             const hasCount = /\\d+\\s+rates?\\s+found/i.test(text);
+            const hasFoundCount = /found\\s+\\d+\\s+rates?/i.test(text);
             const hasInstantRates = /Instant Rates/i.test(text);
+            const hasFetching = /Fetching\\s+in\\s+progress/i.test(text);
             const hasDetailsButton = Array.from(document.querySelectorAll('button, a, div, span'))
                 .some(el => /^View\\s+Details$/i.test((el.innerText || '').trim()));
             const hasRateCards = !!document.querySelector(
                 '[class*="rate-card"], [class*="rateCard"], [class*="result-card"], [class*="instant-rate"]'
             );
-            return hasDetailsButton || (urlLooksLikeResults && hasCount) || (hasInstantRates && hasRateCards);
+            return hasDetailsButton || (urlLooksLikeResults && (hasCount || hasFoundCount || hasInstantRates || hasFetching || hasRateCards));
         }
         """,
         timeout=timeout,
     )
     await asyncio.sleep(0.5)
+
+
+async def scrape_current_results_page(
+    page: Page,
+    emit,
+    quiet_seconds: int = 20,
+    max_seconds: int = 240,
+) -> list:
+    """
+    Scrapes a Kappal results page that has already been reached by another flow.
+    Batch automation should fill/search; this helper owns result-card scraping.
+    """
+    if not _is_results_url(page.url):
+        await _wait_for_results(page, timeout=120_000)
+    else:
+        await asyncio.sleep(1)
+    count = await _get_result_count(page)
+    await emit(f"📦 Results page detected at {page.url}; count={count}.")
+    return await _scrape_cards_as_they_load(
+        page,
+        emit,
+        quiet_seconds=quiet_seconds,
+        max_seconds=max_seconds,
+    )
 
 
 async def _wait_for_results_in_context(ctx, fallback_page: Page, timeout_seconds: int, emit=None):
@@ -1048,7 +1074,7 @@ async def _wait_for_results_in_context(ctx, fallback_page: Page, timeout_seconds
                 if _is_results_url(candidate.url):
                     result_url_seen_at.setdefault(candidate, now)
                     elapsed = now - result_url_seen_at[candidate]
-                    if elapsed >= 120:
+                    if elapsed >= 15:
                         candidate = await _best_result_target(candidate)
                         diag = await _result_page_diagnostics(candidate)
                         await log(
@@ -1110,6 +1136,7 @@ async def _best_result_target(target):
             score = (
                 (100 if result.get("hasDetailsButton") else 0)
                 + (50 if result.get("hasCount") else 0)
+                + (50 if result.get("hasFoundCount") else 0)
                 + (20 if result.get("hasRateText") else 0)
                 + min(int(result.get("textLength") or 0), 10000) / 10000
             )
@@ -1155,11 +1182,23 @@ async def _result_detection(target) -> dict:
             const path = location.pathname || '';
             const urlLooksLikeResults = /\\/rates\\/(fcl|lcl|air|land)\\//i.test(path);
             const hasCount = /\\d+\\s+rates?\\s+found/i.test(text);
+            const hasFoundCount = /found\\s+\\d+\\s+rates?/i.test(text);
             const hasInstantRates = /Instant Rates/i.test(text);
+            const hasFetching = /Fetching\\s+in\\s+progress/i.test(text);
             const hasDetailsButton = deepElements(document.documentElement)
                 .some(el => /^View\\s+Details$/i.test((el.innerText || '').trim()));
             const hasRateText = /Freight Rate/i.test(text) && /Total Rate/i.test(text);
-            return {ok: hasDetailsButton || (urlLooksLikeResults && hasCount) || (hasInstantRates && hasCount) || hasRateText, textLength: text.length, hasCount, hasDetailsButton, hasRateText};
+            return {
+                ok: hasDetailsButton
+                    || (urlLooksLikeResults && (hasCount || hasFoundCount || hasInstantRates || hasFetching))
+                    || (hasInstantRates && (hasCount || hasFoundCount))
+                    || hasRateText,
+                textLength: text.length,
+                hasCount,
+                hasFoundCount,
+                hasDetailsButton,
+                hasRateText,
+            };
         }
         """
     )
@@ -1204,7 +1243,7 @@ async def _result_page_diagnostics(page: Page) -> str:
                     .map(el => (el.innerText || el.textContent || '').trim())
                     .filter(Boolean)
                     .slice(0, 12);
-                const countMatch = text.match(/\\d+\\s+rates?\\s+found/i);
+                const countMatch = text.match(/\\d+\\s+rates?\\s+found/i) || text.match(/found\\s+\\d+\\s+rates?/i);
                 return {
                     textLength: text.length,
                     countText: countMatch ? countMatch[0] : null,
@@ -1249,7 +1288,8 @@ async def _get_result_count(page: Page) -> int:
                     visit(root);
                     return out.replace(/\\s+/g, ' ').trim();
                 };
-                const m = deepText(document).match(/(\\d+)\\s+rates?\\s+found/i);
+                const text = deepText(document);
+                const m = text.match(/(\\d+)\\s+rates?\\s+found/i) || text.match(/found\\s+(\\d+)\\s+rates?/i);
                 return m ? Number(m[1]) : 0;
             }
             """
@@ -1262,6 +1302,9 @@ async def _get_result_count(page: Page) -> int:
     locator_count = await _view_details_buttons(page).count()
     if locator_count:
         return locator_count
+    text_count = await _text_view_details_count(page)
+    if text_count:
+        return text_count
     return await _deep_view_details_count(page)
 
 
@@ -1353,7 +1396,8 @@ async def _scrape_cards_as_they_load(page: Page, emit, quiet_seconds: int = 45, 
 async def _scrape_one_card(page: Page, index: int) -> dict:
     try:
         btns = _view_details_buttons(page)
-        if await btns.count() > index:
+        unique_button_count = await _text_view_details_count(page)
+        if unique_button_count == 0 and await btns.count() > index:
             btn = btns.nth(index)
         else:
             btn = None
@@ -1370,7 +1414,7 @@ async def _scrape_one_card(page: Page, index: int) -> dict:
             await btn.scroll_into_view_if_needed()
             await btn.click()
         else:
-            await _deep_click_view_details(page, index)
+            await _click_view_details(page, index)
 
         await page.wait_for_selector(
             "[role='dialog'], .modal, [class*='Modal'], [class*='details-modal']",
@@ -1389,6 +1433,9 @@ async def _scrape_one_card(page: Page, index: int) -> dict:
 
 
 async def _available_card_count(page: Page) -> int:
+    text_count = await _text_view_details_count(page)
+    if text_count:
+        return text_count
     locator_count = await _view_details_buttons(page).count()
     deep_count = await _deep_view_details_count(page)
     return max(locator_count, deep_count)
@@ -1429,10 +1476,97 @@ async def _results_loader_is_idle(page: Page) -> bool:
 
 def _view_details_buttons(page: Page) -> Locator:
     return page.locator(
-        "button:has-text('View Details'), "
-        "a:has-text('View Details'), "
-        "[role='button']:has-text('View Details')"
+        "button, a, md-button, [role='button'], [class*='button'], [class*='Button'], [class*='btn'], [class*='Btn']",
+        has_text=re.compile(r"View\s*Details", re.I),
     )
+
+
+async def _text_view_details_count(page: Page) -> int:
+    return int(await page.evaluate(
+        """
+        () => {
+            const visible = (el) => {
+                if (!el) return false;
+                const style = getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style.visibility !== 'hidden'
+                    && style.display !== 'none'
+                    && Number(style.opacity || 1) > 0.05
+                    && rect.width > 0
+                    && rect.height > 0;
+            };
+            const clickableAncestor = (el) => {
+                let cur = el;
+                while (cur && cur !== document.documentElement) {
+                    const role = (cur.getAttribute('role') || '').toLowerCase();
+                    const tag = cur.tagName.toLowerCase();
+                    if (tag === 'button' || tag === 'a' || tag === 'md-button' || role === 'button') {
+                        return cur;
+                    }
+                    cur = cur.parentElement;
+                }
+                cur = el;
+                while (cur && cur !== document.documentElement) {
+                    const cls = String(cur.className || '');
+                    const cursor = getComputedStyle(cur).cursor;
+                    if (
+                        cur.onclick ||
+                        /(^|\\s)(btn|button)|Button|Btn|mat-button|md-button/.test(cls) ||
+                        cursor === 'pointer'
+                    ) return cur;
+                    cur = cur.parentElement;
+                }
+                return el;
+            };
+            const cardKey = (target) => {
+                let cur = target;
+                let best = target;
+                while (cur && cur !== document.documentElement) {
+                    const rect = cur.getBoundingClientRect();
+                    const text = (cur.innerText || cur.textContent || '').replace(/\\s+/g, ' ').trim();
+                    if (
+                        visible(cur)
+                        && rect.width >= 420
+                        && rect.height >= 70
+                        && rect.height <= 700
+                        && /View\\s+Details/i.test(text)
+                        && (/Freight\\s+Rate/i.test(text) || /Total\\s+Rate/i.test(text) || /Sailing\\s+Date/i.test(text) || /Effective\\s+Period/i.test(text) || /Proceed/i.test(text))
+                    ) {
+                        best = cur;
+                    }
+                    cur = cur.parentElement;
+                }
+                const rect = best.getBoundingClientRect();
+                return [
+                    Math.round(rect.top / 8),
+                    Math.round(rect.left / 8),
+                    Math.round(rect.width / 8),
+                    Math.round(rect.height / 8),
+                ].join(':');
+            };
+            const found = [];
+            const seen = new Set();
+            const visit = (node) => {
+                if (!node || node.nodeType !== Node.ELEMENT_NODE) return;
+                const text = (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
+                if (/^View\\s+Details$/i.test(text) && visible(node)) {
+                    const target = clickableAncestor(node);
+                    const key = target ? cardKey(target) : '';
+                    if (target && visible(target) && key && !seen.has(key)) {
+                        seen.add(key);
+                        found.push(target);
+                    }
+                }
+                if (node.shadowRoot) {
+                    for (const child of node.shadowRoot.children || []) visit(child);
+                }
+                for (const child of node.children || []) visit(child);
+            };
+            visit(document.documentElement);
+            return found.length;
+        }
+        """
+    ))
 
 
 async def _deep_view_details_count(page: Page) -> int:
@@ -1478,6 +1612,101 @@ async def _deep_click_view_details(page: Page, index: int):
     )
     if not clicked:
         raise RuntimeError(f"Could not find View Details button #{index + 1}")
+
+
+async def _click_view_details(page: Page, index: int):
+    clicked = await page.evaluate(
+        """
+        (index) => {
+            const visible = (el) => {
+                if (!el) return false;
+                const style = getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style.visibility !== 'hidden'
+                    && style.display !== 'none'
+                    && Number(style.opacity || 1) > 0.05
+                    && rect.width > 0
+                    && rect.height > 0;
+            };
+            const clickableAncestor = (el) => {
+                let cur = el;
+                while (cur && cur !== document.documentElement) {
+                    const role = (cur.getAttribute('role') || '').toLowerCase();
+                    const tag = cur.tagName.toLowerCase();
+                    if (tag === 'button' || tag === 'a' || tag === 'md-button' || role === 'button') {
+                        return cur;
+                    }
+                    cur = cur.parentElement;
+                }
+                cur = el;
+                while (cur && cur !== document.documentElement) {
+                    const cls = String(cur.className || '');
+                    const cursor = getComputedStyle(cur).cursor;
+                    if (
+                        cur.onclick ||
+                        /(^|\\s)(btn|button)|Button|Btn|mat-button|md-button/.test(cls) ||
+                        cursor === 'pointer'
+                    ) return cur;
+                    cur = cur.parentElement;
+                }
+                return el;
+            };
+            const cardKey = (target) => {
+                let cur = target;
+                let best = target;
+                while (cur && cur !== document.documentElement) {
+                    const rect = cur.getBoundingClientRect();
+                    const text = (cur.innerText || cur.textContent || '').replace(/\\s+/g, ' ').trim();
+                    if (
+                        visible(cur)
+                        && rect.width >= 420
+                        && rect.height >= 70
+                        && rect.height <= 700
+                        && /View\\s+Details/i.test(text)
+                        && (/Freight\\s+Rate/i.test(text) || /Total\\s+Rate/i.test(text) || /Sailing\\s+Date/i.test(text) || /Effective\\s+Period/i.test(text) || /Proceed/i.test(text))
+                    ) {
+                        best = cur;
+                    }
+                    cur = cur.parentElement;
+                }
+                const rect = best.getBoundingClientRect();
+                return [
+                    Math.round(rect.top / 8),
+                    Math.round(rect.left / 8),
+                    Math.round(rect.width / 8),
+                    Math.round(rect.height / 8),
+                ].join(':');
+            };
+            const found = [];
+            const seen = new Set();
+            const visit = (node) => {
+                if (!node || node.nodeType !== Node.ELEMENT_NODE) return;
+                const text = (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
+                if (/^View\\s+Details$/i.test(text) && visible(node)) {
+                    const target = clickableAncestor(node);
+                    const key = target ? cardKey(target) : '';
+                    if (target && visible(target) && key && !seen.has(key)) {
+                        seen.add(key);
+                        found.push(target);
+                    }
+                }
+                if (node.shadowRoot) {
+                    for (const child of node.shadowRoot.children || []) visit(child);
+                }
+                for (const child of node.children || []) visit(child);
+            };
+            visit(document.documentElement);
+            const target = found[index];
+            if (!target) return false;
+            target.scrollIntoView({block: 'center', inline: 'center'});
+            target.click();
+            return true;
+        }
+        """,
+        index,
+    )
+    if not clicked:
+        await _deep_click_view_details(page, index)
 
 
 # ─── Card summary (visible on results list) ───────────────────────────────────

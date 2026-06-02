@@ -335,6 +335,20 @@
     pointer-events: none;
   }
   .field-hint { font-size: 12px; color: var(--muted); line-height: 1.5; }
+  .file-row { display: flex; gap: 9px; align-items: center; }
+  .file-row input[type="file"] {
+    padding: 9px 10px;
+    height: auto;
+    font-family: var(--sans);
+    font-size: 12.5px;
+  }
+  .secondary {
+    background: var(--panel);
+    color: var(--text-2);
+    border: 1px solid var(--border-2);
+    box-shadow: none;
+  }
+  .secondary:hover:not(:disabled) { background: var(--panel-2); border-color: var(--accent-rg); color: var(--accent); }
 
   /* ── Activity log ────────────────────────────── */
   .log {
@@ -514,6 +528,27 @@
         </div>
 
         <div class="card">
+          <div class="card-head"><h3>Batch Auto Search</h3></div>
+          <div class="card-body">
+            <div class="field">
+              <label for="batch-file">Batch workbook</label>
+              <div class="file-row">
+                <input id="batch-file" type="file" accept=".xlsx,.xlsm" />
+              </div>
+            </div>
+            <button class="primary" id="batch-btn" onclick="startBatch()">
+              <span class="btn-icon" id="batch-icon">⇥</span>
+              <span id="batch-label">Upload &amp; Run Batch</span>
+            </button>
+            <button class="primary secondary" style="margin-top:10px" onclick="downloadBatchTemplate()">
+              <span class="btn-icon">↓</span>
+              <span>Download Test Template</span>
+            </button>
+            <div class="field-hint" id="batch-hint" style="margin-top:12px">Use the one-row template first to verify Kappal auto-fill.</div>
+          </div>
+        </div>
+
+        <div class="card">
           <div class="card-head"><h3>Activity Log</h3></div>
           <div class="log" id="log-area">
             <div class="line"><span class="time">--:--:--</span><span class="msg">Ready. Click "Open Kappal &amp; Capture" to begin.</span></div>
@@ -588,6 +623,63 @@ function startCapture() {
   };
 }
 
+async function startBatch() {
+  const input = document.getElementById('batch-file');
+  if (!input.files || !input.files.length) {
+    log('Choose a batch workbook first.', 'err');
+    return;
+  }
+
+  clearRunState();
+  setBusy(true);
+  setStatus('running', 'Uploading batch workbook...');
+  log('Uploading batch workbook.', 'info');
+
+  const workbookBase64 = await fileToBase64(input.files[0]);
+  const uploadResponse = await fetch('/batch/upload', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      filename: input.files[0].name,
+      content_base64: workbookBase64
+    })
+  });
+  const upload = await uploadResponse.json();
+  if (!uploadResponse.ok) {
+    log(`Batch upload failed: ${upload.error || 'unknown error'}`, 'err');
+    setStatus('error', 'Batch upload failed');
+    setBusy(false);
+    return;
+  }
+
+  document.getElementById('batch-hint').textContent = `${upload.jobs} row(s) loaded from ${upload.filename}`;
+  log(`Batch workbook accepted: ${upload.jobs} search row(s).`, 'ok');
+  setStatus('running', 'Starting batch auto-search...');
+
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws/batch-scrape`);
+
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ upload_id: upload.upload_id, headless: false }));
+  };
+
+  ws.onmessage = (event) => handleMessage(JSON.parse(event.data));
+
+  ws.onerror = () => {
+    log('Batch connection failed.', 'err');
+    setStatus('error', 'Batch connection failed');
+    setBusy(false);
+  };
+
+  ws.onclose = () => {
+    if (document.getElementById('status-dot').className.includes('running')) {
+      log('Batch connection closed unexpectedly.', 'err');
+      setStatus('error', 'Batch connection closed');
+      setBusy(false);
+    }
+  };
+}
+
 function handleMessage(message) {
   if (message.type === 'progress') {
     log(message.message, 'info');
@@ -618,6 +710,12 @@ function setBusy(isBusy) {
   button.disabled = isBusy;
   document.getElementById('capture-icon').textContent = isBusy ? '…' : '↗';
   document.getElementById('capture-label').textContent = isBusy ? 'CAPTURING RATES' : 'OPEN KAPPAL & CAPTURE';
+  const batchButton = document.getElementById('batch-btn');
+  if (batchButton) {
+    batchButton.disabled = isBusy;
+    document.getElementById('batch-icon').textContent = isBusy ? '…' : '⇥';
+    document.getElementById('batch-label').textContent = isBusy ? 'RUNNING BATCH' : 'UPLOAD & RUN BATCH';
+  }
 }
 
 function clearRunState() {
@@ -682,6 +780,22 @@ function downloadBlob(blob, filename) {
   link.download = filename;
   link.click();
   URL.revokeObjectURL(link.href);
+}
+
+function downloadBatchTemplate() {
+  window.location.href = '/batch/template';
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const value = String(reader.result || '');
+      resolve(value.includes(',') ? value.split(',', 2)[1] : value);
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
 }
 
 function escHtml(value) {

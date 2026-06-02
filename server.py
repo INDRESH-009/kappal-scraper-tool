@@ -11,6 +11,8 @@ FastAPI backend for kappal auto scrapper.
 import json
 import asyncio
 import re
+import uuid
+import base64
 from io import BytesIO
 from pathlib import Path
 
@@ -23,6 +25,12 @@ from openpyxl.utils import get_column_letter
 from pydantic import BaseModel
 
 from scraper import authenticate_kappal, manual_search_and_scrape_kappal, scrape_kappal
+from batch_autosearch import (
+    BATCH_SHEET,
+    create_test_batch_workbook,
+    parse_batch_workbook,
+    run_batch_autosearch,
+)
 
 # ─── App setup ────────────────────────────────────────────────────────────────
 
@@ -30,6 +38,9 @@ app = FastAPI(title="kappal auto scrapper", version="1.0.0")
 
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+BATCH_UPLOAD_DIR = Path(__file__).parent / "batch_uploads"
+BATCH_UPLOAD_DIR.mkdir(exist_ok=True)
+BATCH_UPLOADS: dict[str, Path] = {}
 
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
@@ -56,6 +67,54 @@ async def export_excel(payload: dict):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@app.get("/batch/template")
+async def batch_template():
+    output = BytesIO()
+    workbook_path = BATCH_UPLOAD_DIR / "batch_search_test_input.xlsx"
+    create_test_batch_workbook(workbook_path)
+    with workbook_path.open("rb") as f:
+        output.write(f.read())
+    output.seek(0)
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="batch_search_test_input.xlsx"'},
+    )
+
+
+@app.post("/batch/upload")
+async def batch_upload(payload: dict):
+    filename = str(payload.get("filename") or "")
+    content_base64 = str(payload.get("content_base64") or "")
+    if not filename.lower().endswith((".xlsx", ".xlsm")):
+        return JSONResponse({"error": "Upload must be an .xlsx or .xlsm workbook."}, status_code=400)
+    if not content_base64:
+        return JSONResponse({"error": "Missing workbook content."}, status_code=400)
+
+    upload_id = uuid.uuid4().hex
+    safe_name = Path(filename).name
+    path = BATCH_UPLOAD_DIR / f"{upload_id}_{safe_name}"
+    try:
+        path.write_bytes(base64.b64decode(content_base64))
+    except Exception:
+        return JSONResponse({"error": "Workbook content is not valid base64."}, status_code=400)
+
+    try:
+        jobs = parse_batch_workbook(path)
+    except Exception as exc:
+        path.unlink(missing_ok=True)
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    BATCH_UPLOADS[upload_id] = path
+    return {
+        "upload_id": upload_id,
+        "filename": safe_name,
+        "sheet": BATCH_SHEET,
+        "jobs": len(jobs),
+        "first_job": jobs[0].__dict__ if jobs else None,
+    }
 
 
 # ─── WebSocket scrape endpoint ────────────────────────────────────────────────
@@ -182,7 +241,30 @@ def build_rates_workbook(payload: dict) -> Workbook:
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
 
+    _add_errors_sheet(wb, payload.get("errors") or [])
+
     return wb
+
+
+def _add_errors_sheet(wb: Workbook, errors: list[dict]) -> None:
+    if not errors:
+        return
+    ws = wb.create_sheet("Errors")
+    headers = ["Input Row", "Origin", "Destination", "Load Type", "Message"]
+    for col_idx, header in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=col_idx, value=header)
+        cell.font = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+        cell.fill = PatternFill("solid", fgColor=COLOR_RED)
+    for row_idx, error in enumerate(errors, start=2):
+        ws.cell(row=row_idx, column=1, value=error.get("input_row"))
+        ws.cell(row=row_idx, column=2, value=error.get("origin"))
+        ws.cell(row=row_idx, column=3, value=error.get("destination"))
+        ws.cell(row=row_idx, column=4, value=error.get("load_type"))
+        ws.cell(row=row_idx, column=5, value=error.get("message"))
+    widths = [12, 12, 14, 12, 80]
+    for idx, width in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(idx)].width = width
+    ws.freeze_panes = "A2"
 
 
 def _is_exportable_rate(rate: dict) -> bool:
@@ -531,6 +613,50 @@ async def ws_manual_scrape(ws: WebSocket):
             progress_cb=progress,
             headless=False,
             search_timeout=req.search_timeout,
+        )
+
+        await send({"type": "complete", "data": result})
+
+    except WebSocketDisconnect:
+        pass
+    except json.JSONDecodeError as e:
+        await send({"type": "error", "message": f"Bad request JSON: {e}"})
+    except Exception as e:
+        await send({"type": "error", "message": str(e)})
+
+
+@app.websocket("/ws/batch-scrape")
+async def ws_batch_scrape(ws: WebSocket):
+    await ws.accept()
+
+    async def send(obj: dict):
+        await ws.send_text(json.dumps(obj))
+
+    try:
+        raw = await ws.receive_text()
+        req = json.loads(raw)
+        upload_id = req.get("upload_id")
+        workbook_path = BATCH_UPLOADS.get(upload_id)
+
+        # Local-path fallback is useful for developer smoke tests with the
+        # generated one-row workbook. The frontend uses upload_id.
+        if workbook_path is None and req.get("path"):
+            candidate = Path(req["path"])
+            if not candidate.is_absolute():
+                candidate = Path(__file__).parent / candidate
+            workbook_path = candidate
+
+        if workbook_path is None or not workbook_path.exists():
+            await send({"type": "error", "message": "Batch workbook not found. Upload it again."})
+            return
+
+        async def progress(msg: str):
+            await send({"type": "progress", "message": msg})
+
+        result = await run_batch_autosearch(
+            workbook_path,
+            progress_cb=progress,
+            headless=bool(req.get("headless", False)),
         )
 
         await send({"type": "complete", "data": result})
