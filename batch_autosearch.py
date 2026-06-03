@@ -520,24 +520,17 @@ async def _select_cutoff_date_from_picker(page: Page, date_text: str) -> None:
     if await _visible_text_exists(page, target_display):
         return
 
-    date_trigger = page.locator(
-        ".md-datepicker-input:visible, input.md-datepicker-input:visible, "
-        "button:has-text('calendar'), [class*='datepicker']:visible, "
-        "div:has-text('Cut Off Date') >> xpath=following::*[contains(@class,'date') or self::input][1]"
-    ).first
-    if await date_trigger.count() == 0:
-        raise RuntimeError("Cut Off Date picker field not found")
-    await date_trigger.click(force=True)
-    await asyncio.sleep(0.3)
+    await _open_cutoff_date_picker(page)
 
     for _ in range(24):
-        visible_text = await page.locator("body").inner_text()
         wanted_month = target.strftime("%b %Y")
         long_month = target.strftime("%B %Y")
-        if wanted_month in visible_text or long_month in visible_text:
+        picker_text = await _open_date_picker_text(page)
+        if wanted_month in picker_text or long_month in picker_text:
             break
         next_button = page.locator(
-            "button[aria-label*='Next' i], .md-datepicker-next, "
+            ".md-datepicker-calendar-pane button[aria-label*='Next' i], "
+            ".md-calendar button[aria-label*='Next' i], .md-datepicker-next, "
             "button:has-text('›'), button:has-text('>')"
         ).first
         if await next_button.count() == 0:
@@ -555,9 +548,13 @@ async def _select_cutoff_date_from_picker(page: Page, date_text: str) -> None:
                     && style.display !== 'none'
                     && style.visibility !== 'hidden';
             };
-            const candidates = Array.from(document.querySelectorAll(
+            const roots = Array.from(document.querySelectorAll(
+                '.md-datepicker-calendar-pane, .md-calendar, md-calendar, [role="dialog"], .md-datepicker-input-mask-opaque'
+            )).filter(visible);
+            const scope = roots.length ? roots : [document.body];
+            const candidates = scope.flatMap(root => Array.from(root.querySelectorAll(
                 'button, td, [role="gridcell"], .md-calendar-date, .md-calendar-date-selection-indicator'
-            )).filter(el => visible(el) && (el.innerText || el.textContent || '').trim() === String(day));
+            ))).filter(el => visible(el) && (el.innerText || el.textContent || '').trim() === String(day));
             const target = candidates
                 .filter(el => {
                     const rect = el.getBoundingClientRect();
@@ -572,12 +569,186 @@ async def _select_cutoff_date_from_picker(page: Page, date_text: str) -> None:
         target.day,
     )
     if not clicked:
+        clicked = await page.evaluate(
+            """
+            (day) => {
+                const wanted = String(day);
+                const visible = (el) => {
+                    const rect = el.getBoundingClientRect();
+                    const style = getComputedStyle(el);
+                    return rect.width > 0 && rect.height > 0
+                        && style.display !== 'none'
+                        && style.visibility !== 'hidden'
+                        && Number(style.opacity || 1) > 0;
+                };
+                const exactText = (el) => (el.innerText || el.textContent || '').trim();
+                const disabled = (el) => {
+                    const aria = (el.getAttribute('aria-disabled') || '').toLowerCase();
+                    return aria === 'true'
+                        || el.disabled
+                        || el.className.toString().toLowerCase().includes('disabled');
+                };
+                const roots = Array.from(document.querySelectorAll(
+                    '.md-datepicker-calendar-pane, .md-calendar, md-calendar, [role="dialog"]'
+                )).filter(visible);
+                const scope = roots.length ? roots : [document.body];
+                const monthHeaders = scope.flatMap(root => Array.from(root.querySelectorAll('*')))
+                    .filter(el => visible(el) && /\\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s+\\d{4}\\b/.test(exactText(el)))
+                    .map(el => el.getBoundingClientRect())
+                    .sort((a, b) => a.top - b.top);
+                const calendarTop = monthHeaders.length ? monthHeaders[0].top : 0;
+                const calendarBottom = monthHeaders.length > 1
+                    ? monthHeaders[1].top
+                    : window.innerHeight;
+
+                const candidates = scope.flatMap(root => Array.from(root.querySelectorAll('*')))
+                    .filter(el => visible(el) && !disabled(el) && exactText(el) === wanted)
+                    .filter(el => {
+                        const rect = el.getBoundingClientRect();
+                        const childHasSameText = Array.from(el.children || [])
+                            .some(child => visible(child) && exactText(child) === wanted);
+                        return !childHasSameText
+                            && rect.width >= 8
+                            && rect.height >= 8
+                            && rect.width <= 90
+                            && rect.height <= 90
+                            && rect.top > calendarTop
+                            && rect.top < calendarBottom;
+                    })
+                    .sort((a, b) => {
+                        const ar = a.getBoundingClientRect();
+                        const br = b.getBoundingClientRect();
+                        return ar.top - br.top || ar.left - br.left;
+                    });
+                const target = candidates[0];
+                if (!target) return false;
+                const clickable = target.closest('button, td, [role="button"], [role="gridcell"], .md-calendar-date')
+                    || target;
+                const rect = clickable.getBoundingClientRect();
+                const x = rect.left + rect.width / 2;
+                const y = rect.top + rect.height / 2;
+                const topElement = document.elementFromPoint(x, y);
+                (topElement || clickable).dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: x, clientY: y }));
+                (topElement || clickable).dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: x, clientY: y }));
+                (topElement || clickable).click();
+                return true;
+            }
+            """,
+            target.day,
+        )
+    if not clicked:
         try:
             await page.screenshot(path="debug_batch_date.png", full_page=False)
         except Exception:
             pass
         raise RuntimeError(f"Date picker day {target.day} not found")
     await asyncio.sleep(0.3)
+    if not await _visible_text_exists(page, target_display):
+        raise RuntimeError(f"Date picker did not select {target_display}")
+
+
+async def _open_cutoff_date_picker(page: Page) -> None:
+    opened = await page.evaluate(
+        """
+        () => {
+            const visible = (el) => {
+                const rect = el.getBoundingClientRect();
+                const style = getComputedStyle(el);
+                return rect.width > 0 && rect.height > 0
+                    && style.display !== 'none'
+                    && style.visibility !== 'hidden';
+            };
+            const textOf = (el) => (el.innerText || el.textContent || '').trim();
+            const labels = Array.from(document.querySelectorAll('*'))
+                .filter(el => visible(el) && /^Cut Off Date$/i.test(textOf(el)));
+            const label = labels.sort((a, b) => {
+                const ar = a.getBoundingClientRect();
+                const br = b.getBoundingClientRect();
+                return ar.top - br.top || ar.left - br.left;
+            })[0];
+            if (!label) return false;
+            const labelRect = label.getBoundingClientRect();
+            const candidates = Array.from(document.querySelectorAll(
+                'md-datepicker, input, button, div, span'
+            )).filter(el => visible(el)).map(el => ({ el, rect: el.getBoundingClientRect() }))
+              .filter(({ rect }) =>
+                  rect.top > labelRect.bottom
+                  && rect.top < labelRect.bottom + 90
+                  && rect.left >= labelRect.left - 20
+                  && rect.left < labelRect.left + 240
+                  && rect.width > 20
+                  && rect.height > 20
+              )
+              .sort((a, b) => {
+                  const scoreA = Math.abs(a.rect.left - labelRect.left) + Math.abs(a.rect.top - (labelRect.bottom + 25));
+                  const scoreB = Math.abs(b.rect.left - labelRect.left) + Math.abs(b.rect.top - (labelRect.bottom + 25));
+                  return scoreA - scoreB;
+              });
+            const candidate = candidates[0];
+            if (!candidate) return false;
+            const rect = candidate.rect;
+            const x = rect.left + Math.min(28, rect.width / 2);
+            const y = rect.top + rect.height / 2;
+            const topElement = document.elementFromPoint(x, y) || candidate.el;
+            topElement.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: x, clientY: y }));
+            topElement.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: x, clientY: y }));
+            topElement.click();
+            return true;
+        }
+        """
+    )
+    if not opened:
+        date_trigger = page.locator(
+            ".md-datepicker-input:visible, input.md-datepicker-input:visible, "
+            ".md-datepicker-button:visible, button[aria-label*='calendar' i]:visible"
+        ).first
+        if await date_trigger.count() == 0:
+            raise RuntimeError("Cut Off Date picker field not found")
+        await date_trigger.click(force=True)
+
+    try:
+        await page.wait_for_function(
+            """
+            () => {
+                const visible = (el) => {
+                    const rect = el.getBoundingClientRect();
+                    const style = getComputedStyle(el);
+                    return rect.width > 0 && rect.height > 0
+                        && style.display !== 'none'
+                        && style.visibility !== 'hidden';
+                };
+                return Array.from(document.querySelectorAll(
+                    '.md-datepicker-calendar-pane, .md-calendar, md-calendar, [role="dialog"]'
+                )).some(el => visible(el) && /\\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s+\\d{4}\\b/.test(el.innerText || el.textContent || ''));
+            }
+            """,
+            timeout=3000,
+        )
+    except Exception as exc:
+        try:
+            await page.screenshot(path="debug_batch_date_open.png", full_page=False)
+        except Exception:
+            pass
+        raise RuntimeError("Cut Off Date picker did not open") from exc
+
+
+async def _open_date_picker_text(page: Page) -> str:
+    return await page.evaluate(
+        """
+        () => {
+            const visible = (el) => {
+                const rect = el.getBoundingClientRect();
+                const style = getComputedStyle(el);
+                return rect.width > 0 && rect.height > 0
+                    && style.display !== 'none'
+                    && style.visibility !== 'hidden';
+            };
+            return Array.from(document.querySelectorAll(
+                '.md-datepicker-calendar-pane, .md-calendar, md-calendar, [role="dialog"]'
+            )).filter(visible).map(el => el.innerText || el.textContent || '').join('\\n');
+        }
+        """
+    )
 
 
 async def _visible_text_exists(page: Page, text: str) -> bool:
