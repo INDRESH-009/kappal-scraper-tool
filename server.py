@@ -657,6 +657,7 @@ async def ws_batch_scrape(ws: WebSocket):
             workbook_path,
             progress_cb=progress,
             headless=bool(req.get("headless", False)),
+            auth_timeout=int(req.get("auth_timeout", 900)),
         )
 
         await send({"type": "complete", "data": result})

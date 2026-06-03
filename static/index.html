@@ -1288,6 +1288,7 @@ function startCapture() {
 
 async function startBatch() {
   const input = document.getElementById('batch-file');
+  const timeout = parseInt(val('f-timeout')) || 900;
   if (!input.files || !input.files.length) {
     log('Choose a batch workbook first.', 'err');
     return;
@@ -1325,7 +1326,7 @@ async function startBatch() {
   ws = new WebSocket(`${proto}://${location.host}/ws/batch-scrape`);
 
   ws.onopen = () => {
-    ws.send(JSON.stringify({ upload_id: upload.upload_id, headless: false }));
+    ws.send(JSON.stringify({ upload_id: upload.upload_id, headless: false, auth_timeout: timeout }));
   };
 
   ws.onmessage = (event) => handleMessage(JSON.parse(event.data));

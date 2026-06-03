@@ -24,6 +24,7 @@ from scraper import (
     _set_section_checkbox,
     _set_service_mode,
     _wait_for_app_idle,
+    _wait_for_login,
     _wait_for_results_in_context,
     scrape_current_results_page,
 )
@@ -194,6 +195,7 @@ async def run_batch_autosearch(
     workbook_path: str | Path,
     progress_cb: Optional[Callable[[str], Any]] = None,
     headless: bool = False,
+    auth_timeout: int = 900,
 ) -> dict:
     """
     Runs all searches from a batch workbook and returns a combined scrape payload:
@@ -215,7 +217,16 @@ async def run_batch_autosearch(
             await page.goto(RATES_URL, wait_until="domcontentloaded")
             await page.wait_for_load_state("networkidle")
             if "login" in page.url:
-                raise RuntimeError("Kappal is not authenticated. Run authentication first.")
+                await emit(
+                    "Kappal login is required. Complete login/CAPTCHA in the browser window; "
+                    f"batch will continue after authentication. Waiting up to {auth_timeout}s."
+                )
+                await _wait_for_login(page, auth_timeout, emit)
+                await emit("Authentication complete. Opening Rate Search for batch run.")
+                await page.goto(RATES_URL, wait_until="domcontentloaded")
+                await page.wait_for_load_state("networkidle")
+                if "login" in page.url:
+                    raise RuntimeError("Kappal is still on login after authentication. Please try again.")
 
             for idx, job in enumerate(jobs, start=1):
                 label = f"{job.origin_code}->{job.destination_code} {job.load_type}x{job.quantity}"
