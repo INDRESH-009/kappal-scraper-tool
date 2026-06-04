@@ -10,13 +10,18 @@ FastAPI backend for kappal auto scrapper.
 
 import json
 import asyncio
+import os
 import re
 import uuid
 import base64
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from openpyxl import Workbook
@@ -42,6 +47,181 @@ BATCH_UPLOAD_DIR = Path(__file__).parent / "batch_uploads"
 BATCH_UPLOAD_DIR.mkdir(exist_ok=True)
 BATCH_UPLOADS: dict[str, Path] = {}
 
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://gjvjidvujhqsliwxzjvz.supabase.co").rstrip("/")
+SUPABASE_PUBLISHABLE_KEY = os.environ.get(
+    "SUPABASE_PUBLISHABLE_KEY",
+    "sb_publishable_XCXJYqNHdeaY9RBOtQg10Q_LrdxSvHx",
+)
+OFFLINE_GRACE_DAYS = int(os.environ.get("OFFLINE_GRACE_DAYS", "7"))
+
+
+class LicenseError(RuntimeError):
+    pass
+
+
+def _supabase_enabled() -> bool:
+    return bool(SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY)
+
+
+def _auth_header(token: str | None = None) -> dict[str, str]:
+    bearer = token or SUPABASE_PUBLISHABLE_KEY
+    return {
+        "apikey": SUPABASE_PUBLISHABLE_KEY,
+        "Authorization": f"Bearer {bearer}",
+        "Content-Type": "application/json",
+    }
+
+
+def _supabase_request_sync(
+    method: str,
+    path: str,
+    *,
+    token: str | None = None,
+    body: dict | list | None = None,
+    prefer: str | None = None,
+) -> object:
+    if not _supabase_enabled():
+        raise LicenseError("License server is not configured.")
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    headers = _auth_header(token)
+    if prefer:
+        headers["Prefer"] = prefer
+    request = urllib.request.Request(
+        f"{SUPABASE_URL}{path}",
+        data=data,
+        headers=headers,
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            raw = response.read().decode("utf-8")
+            return json.loads(raw) if raw else None
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            data = json.loads(raw)
+            message = data.get("msg") or data.get("message") or data.get("error_description") or raw
+        except Exception:
+            message = raw or str(exc)
+        raise LicenseError(message) from exc
+    except urllib.error.URLError as exc:
+        raise LicenseError(f"Could not reach license server: {exc.reason}") from exc
+
+
+async def _supabase_request(method: str, path: str, **kwargs) -> object:
+    return await asyncio.to_thread(_supabase_request_sync, method, path, **kwargs)
+
+
+def _bearer_token(value: str | None) -> str | None:
+    if not value:
+        return None
+    parts = value.strip().split(None, 1)
+    if len(parts) == 2 and parts[0].lower() == "bearer":
+        return parts[1].strip()
+    return None
+
+
+def _iso_expired(value: str | None) -> bool:
+    if not value:
+        return False
+    try:
+        expiry = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return expiry.astimezone(timezone.utc) < datetime.now(timezone.utc)
+    except Exception:
+        return False
+
+
+def _rest_filter(value: str) -> str:
+    return urllib.parse.quote(str(value), safe="")
+
+
+async def _validate_license(token: str | None, device_id: str | None, device_name: str | None = None) -> dict:
+    if not token:
+        raise LicenseError("Login required. Please sign in again.")
+    if not device_id:
+        raise LicenseError("Device activation is missing. Please sign in again.")
+
+    user = await _supabase_request("GET", "/auth/v1/user", token=token)
+    if not isinstance(user, dict) or not user.get("id"):
+        raise LicenseError("Could not validate logged-in user.")
+
+    user_id = user["id"]
+    license_path = (
+        "/rest/v1/licenses?select=status,plan,max_devices,expires_at"
+        f"&user_id=eq.{_rest_filter(user_id)}&limit=1"
+    )
+    licenses = await _supabase_request("GET", license_path, token=token)
+    license_row = licenses[0] if isinstance(licenses, list) and licenses else None
+    if not license_row:
+        raise LicenseError("No license is assigned to this user.")
+    if str(license_row.get("status") or "").lower() != "active":
+        raise LicenseError("This license is not active.")
+    if _iso_expired(license_row.get("expires_at")):
+        raise LicenseError("This license has expired.")
+
+    devices_path = (
+        "/rest/v1/device_activations?select=device_id,is_active"
+        f"&user_id=eq.{_rest_filter(user_id)}&is_active=eq.true"
+    )
+    devices = await _supabase_request("GET", devices_path, token=token)
+    active_devices = devices if isinstance(devices, list) else []
+    current_device = next((row for row in active_devices if row.get("device_id") == device_id), None)
+    max_devices = int(license_row.get("max_devices") or 1)
+
+    if current_device is None:
+        if len(active_devices) >= max_devices:
+            raise LicenseError(
+                f"Device limit reached for this license ({len(active_devices)}/{max_devices})."
+            )
+        await _supabase_request(
+            "POST",
+            "/rest/v1/device_activations",
+            token=token,
+            prefer="return=minimal",
+            body={
+                "user_id": user_id,
+                "device_id": device_id,
+                "device_name": device_name or "Unknown device",
+                "is_active": True,
+            },
+        )
+    else:
+        patch_path = (
+            "/rest/v1/device_activations"
+            f"?user_id=eq.{_rest_filter(user_id)}&device_id=eq.{_rest_filter(device_id)}"
+        )
+        await _supabase_request(
+            "PATCH",
+            patch_path,
+            token=token,
+            prefer="return=minimal",
+            body={"last_seen_at": datetime.now(timezone.utc).isoformat()},
+        )
+
+    return {
+        "user": {"id": user_id, "email": user.get("email")},
+        "license": license_row,
+        "device_id": device_id,
+    }
+
+
+async def _require_http_license(request: Request, payload: dict | None = None) -> dict:
+    token = _bearer_token(request.headers.get("Authorization"))
+    payload = payload if isinstance(payload, dict) else {}
+    return await _validate_license(
+        token,
+        str(payload.get("_device_id") or request.headers.get("X-Device-Id") or ""),
+        str(payload.get("_device_name") or request.headers.get("X-Device-Name") or ""),
+    )
+
+
+async def _require_ws_license(req: dict) -> dict:
+    return await _validate_license(
+        str(req.get("access_token") or ""),
+        str(req.get("device_id") or ""),
+        str(req.get("device_name") or ""),
+    )
+
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
 
@@ -55,8 +235,62 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/auth/config")
+async def auth_config():
+    return {
+        "supabase_url": SUPABASE_URL,
+        "supabase_publishable_key": SUPABASE_PUBLISHABLE_KEY,
+        "offline_grace_days": OFFLINE_GRACE_DAYS,
+    }
+
+
+@app.post("/auth/verify")
+async def auth_verify(request: Request, payload: dict):
+    try:
+        return await _require_http_license(request, payload)
+    except LicenseError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=401)
+
+
+@app.post("/auth/login")
+async def auth_login(payload: dict):
+    email = str(payload.get("email") or "").strip()
+    password = str(payload.get("password") or "")
+    if not email or not password:
+        return JSONResponse({"error": "Email and password are required."}, status_code=400)
+    try:
+        result = await _supabase_request(
+            "POST",
+            "/auth/v1/token?grant_type=password",
+            body={"email": email, "password": password},
+        )
+        return result
+    except LicenseError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=401)
+
+
+@app.post("/auth/refresh")
+async def auth_refresh(payload: dict):
+    refresh_token = str(payload.get("refresh_token") or "")
+    if not refresh_token:
+        return JSONResponse({"error": "Refresh token is required."}, status_code=400)
+    try:
+        result = await _supabase_request(
+            "POST",
+            "/auth/v1/token?grant_type=refresh_token",
+            body={"refresh_token": refresh_token},
+        )
+        return result
+    except LicenseError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=401)
+
+
 @app.post("/export/excel")
-async def export_excel(payload: dict):
+async def export_excel(request: Request, payload: dict):
+    try:
+        await _require_http_license(request, payload)
+    except LicenseError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=401)
     workbook = build_rates_workbook(payload)
     output = BytesIO()
     workbook.save(output)
@@ -85,7 +319,11 @@ async def batch_template():
 
 
 @app.post("/batch/upload")
-async def batch_upload(payload: dict):
+async def batch_upload(request: Request, payload: dict):
+    try:
+        await _require_http_license(request, payload)
+    except LicenseError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=401)
     filename = str(payload.get("filename") or "")
     content_base64 = str(payload.get("content_base64") or "")
     if not filename.lower().endswith((".xlsx", ".xlsm")):
@@ -574,7 +812,9 @@ async def ws_authenticate(ws: WebSocket):
 
     try:
         raw = await ws.receive_text()
-        req = AuthRequest(**json.loads(raw))
+        raw_req = json.loads(raw)
+        await _require_ws_license(raw_req)
+        req = AuthRequest(**raw_req)
 
         async def progress(msg: str):
             await send({"type": "progress", "message": msg})
@@ -604,7 +844,9 @@ async def ws_manual_scrape(ws: WebSocket):
 
     try:
         raw = await ws.receive_text()
-        req = ManualScrapeRequest(**json.loads(raw))
+        raw_req = json.loads(raw)
+        await _require_ws_license(raw_req)
+        req = ManualScrapeRequest(**raw_req)
 
         async def progress(msg: str):
             await send({"type": "progress", "message": msg})
@@ -635,6 +877,7 @@ async def ws_batch_scrape(ws: WebSocket):
     try:
         raw = await ws.receive_text()
         req = json.loads(raw)
+        await _require_ws_license(req)
         upload_id = req.get("upload_id")
         workbook_path = BATCH_UPLOADS.get(upload_id)
 
@@ -691,7 +934,9 @@ async def ws_scrape(ws: WebSocket):
 
     try:
         raw = await ws.receive_text()
-        req = ScrapeRequest(**json.loads(raw))
+        raw_req = json.loads(raw)
+        await _require_ws_license(raw_req)
+        req = ScrapeRequest(**raw_req)
 
         async def progress(msg: str):
             await send({"type": "progress", "message": msg})

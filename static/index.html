@@ -921,6 +921,100 @@
     pointer-events: none;
   }
 
+  .auth-screen {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    background:
+      radial-gradient(circle at 20% 15%, rgba(103,232,249,.12), transparent 28%),
+      radial-gradient(circle at 80% 80%, rgba(74,222,128,.1), transparent 30%),
+      var(--bg);
+  }
+  .auth-screen.hidden { display: none; }
+  .auth-panel {
+    width: min(420px, 100%);
+    border: 1px solid var(--border);
+    border-radius: var(--r);
+    background: var(--panel);
+    box-shadow: 0 24px 80px rgba(0,0,0,.28);
+    padding: 24px;
+  }
+  .auth-mark {
+    width: 44px;
+    height: 44px;
+    display: grid;
+    place-items: center;
+    border-radius: 12px;
+    color: var(--blue);
+    background: var(--blue-bg);
+    border: 1px solid var(--blue-rg);
+    font-weight: 800;
+    margin-bottom: 18px;
+  }
+  .auth-title {
+    font-size: 24px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 6px;
+  }
+  .auth-copy {
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.5;
+    margin-bottom: 18px;
+  }
+  .auth-error {
+    display: none;
+    color: var(--red);
+    background: var(--red-bg);
+    border: 1px solid var(--red-rg);
+    border-radius: var(--r-sm);
+    padding: 10px 12px;
+    margin-bottom: 14px;
+    font-size: 12px;
+    line-height: 1.4;
+  }
+  .auth-error.visible { display: block; }
+  .auth-actions {
+    display: grid;
+    gap: 10px;
+    margin-top: 18px;
+  }
+  .auth-meta {
+    margin-top: 14px;
+    color: var(--faint);
+    font-size: 11px;
+    font-family: var(--mono);
+    word-break: break-all;
+  }
+  .auth-user {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    color: var(--muted);
+    font-size: 12px;
+    min-width: 0;
+  }
+  .auth-user.visible { display: inline-flex; }
+  .auth-user button {
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    color: var(--text-2);
+    border-radius: 999px;
+    padding: 6px 10px;
+    cursor: pointer;
+    font: inherit;
+  }
+  .auth-user span {
+    max-width: 220px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   /* ── Responsive ──────────────────────────────── */
   @media (max-width: 960px) {
     .action-row { grid-template-columns: 1fr; }
@@ -934,12 +1028,41 @@
 </head>
 <body>
 
+<div class="auth-screen" id="auth-screen">
+  <form class="auth-panel" onsubmit="login(event)">
+    <div class="auth-mark">K</div>
+    <div class="auth-title">Sign in to Kappal Rate Capture</div>
+    <div class="auth-copy">Use the account assigned by your team. Your Kappal login stays separate and opens only when capture starts.</div>
+    <div class="auth-error" id="auth-error"></div>
+    <div class="field">
+      <label for="auth-email">Email</label>
+      <div class="input-wrap">
+        <input id="auth-email" type="email" autocomplete="username" placeholder="client@example.com" required />
+      </div>
+    </div>
+    <div class="field">
+      <label for="auth-password">Password</label>
+      <div class="input-wrap">
+        <input id="auth-password" type="password" autocomplete="current-password" placeholder="Password" required />
+      </div>
+    </div>
+    <div class="auth-actions">
+      <button class="primary" id="auth-login-btn" type="submit">Sign In</button>
+    </div>
+    <div class="auth-meta" id="auth-meta">Checking license server...</div>
+  </form>
+</div>
+
 <header class="topbar">
   <div class="logo">K</div>
   <div class="brand-name">Kappal Rate Capture</div>
   <div class="tb-divider"></div>
   <div class="tb-crumb">rate-capture · fcl-automation</div>
   <div class="topbar-right">
+    <div class="auth-user" id="auth-user">
+      <span id="auth-user-email"></span>
+      <button onclick="logout()">Sign out</button>
+    </div>
     <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" aria-label="Toggle color theme">
       <span class="theme-icon" id="theme-icon">D</span>
       <span id="theme-label">Dark</span>
@@ -1077,6 +1200,11 @@ let ws = null;
 let lastResult = null;
 let runStartedAt = null;
 let runTimer = null;
+let authConfig = null;
+let authSession = null;
+let authLicense = null;
+const AUTH_SESSION_KEY = 'kappal-auth-session';
+const DEVICE_ID_KEY = 'kappal-device-id';
 let runState = {
   totalJobs: 0,
   currentJob: 0,
@@ -1118,6 +1246,200 @@ function initTheme() {
 }
 
 initTheme();
+initAuth();
+
+function getDeviceId() {
+  let id = localStorage.getItem(DEVICE_ID_KEY);
+  if (!id) {
+    id = crypto.randomUUID ? crypto.randomUUID() : `device-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    localStorage.setItem(DEVICE_ID_KEY, id);
+  }
+  return id;
+}
+
+function getDeviceName() {
+  return `${navigator.platform || 'Desktop'} · ${navigator.userAgent.match(/(Chrome|Firefox|Safari|Edg)\/[\d.]+/)?.[0] || 'Browser'}`;
+}
+
+function showAuthError(message) {
+  const box = document.getElementById('auth-error');
+  if (!box) return;
+  box.textContent = message;
+  box.className = message ? 'auth-error visible' : 'auth-error';
+}
+
+function setAuthBusy(isBusy) {
+  const btn = document.getElementById('auth-login-btn');
+  if (!btn) return;
+  btn.disabled = isBusy;
+  btn.textContent = isBusy ? 'Signing In...' : 'Sign In';
+}
+
+function setAuthVisible(isVisible) {
+  const screen = document.getElementById('auth-screen');
+  if (screen) screen.className = isVisible ? 'auth-screen' : 'auth-screen hidden';
+}
+
+function updateAuthUser() {
+  const wrap = document.getElementById('auth-user');
+  const email = document.getElementById('auth-user-email');
+  if (!wrap || !email) return;
+  if (authSession?.user?.email) {
+    email.textContent = authSession.user.email;
+    wrap.className = 'auth-user visible';
+  } else {
+    email.textContent = '';
+    wrap.className = 'auth-user';
+  }
+}
+
+async function initAuth() {
+  const meta = document.getElementById('auth-meta');
+  try {
+    const response = await fetch('/auth/config');
+    authConfig = await response.json();
+    if (meta) meta.textContent = `Device: ${getDeviceId()}`;
+  } catch (error) {
+    showAuthError('Could not load local auth configuration.');
+    if (meta) meta.textContent = 'Auth config unavailable';
+    return;
+  }
+
+  try {
+    authSession = JSON.parse(localStorage.getItem(AUTH_SESSION_KEY) || 'null');
+  } catch {
+    authSession = null;
+  }
+
+  if (authSession?.access_token) {
+    try {
+      await verifyLicense();
+      setAuthVisible(false);
+      updateAuthUser();
+      setStatus('', 'Ready');
+      return;
+    } catch {
+      try {
+        await refreshSession();
+        await verifyLicense();
+        setAuthVisible(false);
+        updateAuthUser();
+        setStatus('', 'Ready');
+        return;
+      } catch {
+        localStorage.removeItem(AUTH_SESSION_KEY);
+        authSession = null;
+      }
+    }
+  }
+
+  setAuthVisible(true);
+  updateAuthUser();
+}
+
+async function login(event) {
+  event.preventDefault();
+  if (!authConfig) {
+    showAuthError('License server config is not loaded yet.');
+    return;
+  }
+  setAuthBusy(true);
+  showAuthError('');
+  const email = val('auth-email');
+  const password = val('auth-password');
+
+  try {
+    const response = await fetch('/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password })
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || data.msg || data.message || data.detail || 'Login failed.');
+    authSession = data;
+    localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(authSession));
+    await verifyLicense();
+    setAuthVisible(false);
+    updateAuthUser();
+    setStatus('', 'Ready');
+    log(`Signed in as ${authSession.user?.email || email}.`, 'ok');
+  } catch (error) {
+    localStorage.removeItem(AUTH_SESSION_KEY);
+    authSession = null;
+    showAuthError(error.message || 'Login failed.');
+  } finally {
+    setAuthBusy(false);
+  }
+}
+
+async function refreshSession() {
+  if (!authConfig || !authSession?.refresh_token) throw new Error('No saved session.');
+  const response = await fetch('/auth/refresh', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ refresh_token: authSession.refresh_token })
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || data.msg || data.message || data.detail || 'Session refresh failed.');
+  authSession = data;
+  localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(authSession));
+}
+
+async function verifyLicense() {
+  if (!authSession?.access_token) throw new Error('Login required.');
+  const response = await fetch('/auth/verify', {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify(authPayload())
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'License check failed.');
+  authLicense = data.license;
+  return data;
+}
+
+function authPayload(extra = {}) {
+  return {
+    ...extra,
+    _device_id: getDeviceId(),
+    _device_name: getDeviceName()
+  };
+}
+
+function authHeaders(extra = {}) {
+  return {
+    ...extra,
+    Authorization: `Bearer ${authSession?.access_token || ''}`,
+    'X-Device-Id': getDeviceId(),
+    'X-Device-Name': getDeviceName(),
+    'Content-Type': 'application/json'
+  };
+}
+
+function authWsPayload(extra = {}) {
+  return {
+    ...extra,
+    access_token: authSession?.access_token || '',
+    device_id: getDeviceId(),
+    device_name: getDeviceName()
+  };
+}
+
+function ensureLoggedIn() {
+  if (authSession?.access_token) return true;
+  setAuthVisible(true);
+  showAuthError('Please sign in before starting a capture.');
+  return false;
+}
+
+function logout() {
+  authSession = null;
+  authLicense = null;
+  localStorage.removeItem(AUTH_SESSION_KEY);
+  setAuthVisible(true);
+  updateAuthUser();
+  setStatus('', 'Signed out');
+}
 
 function log(message, type = 'info') {
   const area = document.getElementById('log-area');
@@ -1253,6 +1575,7 @@ function formatLogEntry(message, type = 'info') {
 }
 
 function startCapture() {
+  if (!ensureLoggedIn()) return;
   const timeout = parseInt(val('f-timeout')) || 900;
   clearRunState();
   startRun('manual', 'Manual capture running', `Timeout ${timeout}s`);
@@ -1264,7 +1587,7 @@ function startCapture() {
   ws = new WebSocket(`${proto}://${location.host}/ws/manual-scrape`);
 
   ws.onopen = () => {
-    ws.send(JSON.stringify({ search_timeout: timeout }));
+    ws.send(JSON.stringify(authWsPayload({ search_timeout: timeout })));
   };
 
   ws.onmessage = (event) => handleMessage(JSON.parse(event.data));
@@ -1287,6 +1610,7 @@ function startCapture() {
 }
 
 async function startBatch() {
+  if (!ensureLoggedIn()) return;
   const input = document.getElementById('batch-file');
   const timeout = parseInt(val('f-timeout')) || 900;
   if (!input.files || !input.files.length) {
@@ -1303,11 +1627,11 @@ async function startBatch() {
   const workbookBase64 = await fileToBase64(input.files[0]);
   const uploadResponse = await fetch('/batch/upload', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
+    headers: authHeaders(),
+    body: JSON.stringify(authPayload({
       filename: input.files[0].name,
       content_base64: workbookBase64
-    })
+    }))
   });
   const upload = await uploadResponse.json();
   if (!uploadResponse.ok) {
@@ -1326,7 +1650,7 @@ async function startBatch() {
   ws = new WebSocket(`${proto}://${location.host}/ws/batch-scrape`);
 
   ws.onopen = () => {
-    ws.send(JSON.stringify({ upload_id: upload.upload_id, headless: false, auth_timeout: timeout }));
+    ws.send(JSON.stringify(authWsPayload({ upload_id: upload.upload_id, headless: false, auth_timeout: timeout })));
   };
 
   ws.onmessage = (event) => handleMessage(JSON.parse(event.data));
@@ -1435,8 +1759,8 @@ async function downloadExcel() {
   if (!lastResult) return;
   const response = await fetch('/export/excel', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(lastResult)
+    headers: authHeaders(),
+    body: JSON.stringify(authPayload(lastResult))
   });
   if (!response.ok) {
     log('Excel export failed.', 'err');
