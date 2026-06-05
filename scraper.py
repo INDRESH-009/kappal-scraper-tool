@@ -14,12 +14,15 @@ from typing import Optional, Callable, Any
 
 from playwright.async_api import async_playwright, Page, Locator, ElementHandle
 
+from app_paths import runtime_dir, runtime_file
+
 # ─── Constants ────────────────────────────────────────────────────────────────
 
 BASE_URL      = "https://digital.kappal.co"
 LOGIN_URL     = f"{BASE_URL}/login"
 RATES_URL     = f"{BASE_URL}/rates"
-AUTH_PROFILE_DIR = Path(__file__).parent / ".kappal-auth-profile"
+AUTH_PROFILE_DIR = runtime_dir("kappal-auth-profile")
+DEBUG_DIR = runtime_dir("debug")
 PORT_QUERY_FALLBACKS = {
     "chennai": ["INMAA"],
     "new york": ["USNYC"],
@@ -79,7 +82,7 @@ async def manual_search_and_scrape_kappal(
 
         async def snap(name: str):
             try:
-                path = f"debug_{name}.png"
+                path = DEBUG_DIR / f"debug_{name}.png"
                 await page.screenshot(path=path, full_page=False)
                 await emit(f"📸 Screenshot saved → {path}")
             except Exception:
@@ -118,8 +121,9 @@ async def manual_search_and_scrape_kappal(
 
         except Exception as exc:
             try:
-                await page.screenshot(path="debug_ERROR.png")
-                await emit("📸 Error screenshot → debug_ERROR.png")
+                path = DEBUG_DIR / "debug_ERROR.png"
+                await page.screenshot(path=path)
+                await emit(f"📸 Error screenshot → {path}")
                 await emit(f"   URL at failure: {page.url}")
             except Exception:
                 pass
@@ -183,6 +187,7 @@ async def scrape_kappal(
             """Save a debug screenshot."""
             try:
                 path = f"debug_{name}.png"
+                path = DEBUG_DIR / path
                 await page.screenshot(path=path, full_page=False)
                 await emit(f"📸 Screenshot saved → {path}")
             except Exception:
@@ -243,8 +248,9 @@ async def scrape_kappal(
 
         except Exception as exc:
             try:
-                await page.screenshot(path="debug_ERROR.png")
-                await emit(f"📸 Error screenshot → debug_ERROR.png  (open it to see what went wrong)")
+                path = DEBUG_DIR / "debug_ERROR.png"
+                await page.screenshot(path=path)
+                await emit(f"📸 Error screenshot → {path}  (open it to see what went wrong)")
                 await emit(f"   URL at failure: {page.url}")
             except Exception:
                 pass
@@ -316,9 +322,10 @@ async def _fill_search_form(
                 return document.body.innerHTML.slice(0, 8000);
             }
         """)
-        with open("debug_form_html.txt", "w") as f:
+        debug_html = runtime_file("debug_form_html.txt")
+        with debug_html.open("w", encoding="utf-8") as f:
             f.write(form_html)
-        await log("📄 Form HTML saved → debug_form_html.txt (open to inspect DOM)")
+        await log(f"📄 Form HTML saved → {debug_html} (open to inspect DOM)")
     except Exception as e:
         await log(f"   Could not save HTML: {e}")
 

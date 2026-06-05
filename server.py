@@ -17,6 +17,7 @@ import base64
 import urllib.error
 import urllib.parse
 import urllib.request
+import traceback
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
@@ -29,6 +30,7 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 from pydantic import BaseModel
 
+from app_paths import bundled_base_dir, runtime_dir, runtime_file
 from scraper import authenticate_kappal, manual_search_and_scrape_kappal, scrape_kappal
 from batch_autosearch import (
     BATCH_SHEET,
@@ -41,10 +43,9 @@ from batch_autosearch import (
 
 app = FastAPI(title="kappal auto scrapper", version="1.0.0")
 
-STATIC_DIR = Path(__file__).parent / "static"
+STATIC_DIR = bundled_base_dir() / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-BATCH_UPLOAD_DIR = Path(__file__).parent / "batch_uploads"
-BATCH_UPLOAD_DIR.mkdir(exist_ok=True)
+BATCH_UPLOAD_DIR = runtime_dir("batch_uploads")
 BATCH_UPLOADS: dict[str, Path] = {}
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://gjvjidvujhqsliwxzjvz.supabase.co").rstrip("/")
@@ -57,6 +58,15 @@ OFFLINE_GRACE_DAYS = int(os.environ.get("OFFLINE_GRACE_DAYS", "7"))
 
 class LicenseError(RuntimeError):
     pass
+
+
+@app.middleware("http")
+async def log_unhandled_errors(request: Request, call_next):
+    try:
+        return await call_next(request)
+    except Exception:
+        runtime_file("server_error.log").write_text(traceback.format_exc(), encoding="utf-8")
+        raise
 
 
 def _supabase_enabled() -> bool:
@@ -227,7 +237,10 @@ async def _require_ws_license(req: dict) -> dict:
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    return (STATIC_DIR / "index.html").read_text()
+    index_path = STATIC_DIR / "index.html"
+    if not index_path.exists():
+        raise RuntimeError(f"Frontend file not found: {index_path}")
+    return index_path.read_text(encoding="utf-8")
 
 
 @app.get("/health")
@@ -886,7 +899,7 @@ async def ws_batch_scrape(ws: WebSocket):
         if workbook_path is None and req.get("path"):
             candidate = Path(req["path"])
             if not candidate.is_absolute():
-                candidate = Path(__file__).parent / candidate
+                candidate = bundled_base_dir() / candidate
             workbook_path = candidate
 
         if workbook_path is None or not workbook_path.exists():

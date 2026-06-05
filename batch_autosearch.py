@@ -18,6 +18,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
 from playwright.async_api import Locator, Page, async_playwright
 
+from app_paths import runtime_dir
 from scraper import (
     RATES_URL,
     _launch_context,
@@ -28,6 +29,8 @@ from scraper import (
     _wait_for_results_in_context,
     scrape_current_results_page,
 )
+
+DEBUG_DIR = runtime_dir("debug")
 
 
 BATCH_SHEET = "Batch Search Input"
@@ -246,7 +249,7 @@ async def run_batch_autosearch(
                     await emit(f"Row {job.input_row}: complete")
                 except Exception as exc:
                     try:
-                        await page.screenshot(path=f"debug_batch_row_{job.input_row}_failure.png", full_page=False)
+                        await page.screenshot(path=DEBUG_DIR / f"debug_batch_row_{job.input_row}_failure.png", full_page=False)
                     except Exception:
                         pass
                     errors.append(
@@ -349,7 +352,7 @@ async def _select_port_exact(page: Page, section: str, name: str, code: str) -> 
         except Exception as exc:
             last_error = str(exc)
     try:
-        await page.screenshot(path=f"debug_batch_{section}_{code}.png", full_page=False)
+        await page.screenshot(path=DEBUG_DIR / f"debug_batch_{section}_{code}.png", full_page=False)
     except Exception:
         pass
     raise RuntimeError(f"Could not select {section} port {name} / {code}: {last_error}")
@@ -638,7 +641,7 @@ async def _select_cutoff_date_from_picker(page: Page, date_text: str) -> None:
         )
     if not clicked:
         try:
-            await page.screenshot(path="debug_batch_date.png", full_page=False)
+            await page.screenshot(path=DEBUG_DIR / "debug_batch_date.png", full_page=False)
         except Exception:
             pass
         raise RuntimeError(f"Date picker day {target.day} not found")
@@ -726,7 +729,7 @@ async def _open_cutoff_date_picker(page: Page) -> None:
         )
     except Exception as exc:
         try:
-            await page.screenshot(path="debug_batch_date_open.png", full_page=False)
+            await page.screenshot(path=DEBUG_DIR / "debug_batch_date_open.png", full_page=False)
         except Exception:
             pass
         raise RuntimeError("Cut Off Date picker did not open") from exc
@@ -797,7 +800,7 @@ async def _set_load_type_dialog(
     if not await _visible_text_exists(page, f"{load_type} x{quantity}"):
         if not await _visible_text_exists(page, f"{load_type}x{quantity}"):
             try:
-                await page.screenshot(path="debug_batch_load_type.png", full_page=False)
+                await page.screenshot(path=DEBUG_DIR / "debug_batch_load_type.png", full_page=False)
             except Exception:
                 pass
             raise RuntimeError(f"Load type summary did not validate as {load_type} x{quantity}")
@@ -887,7 +890,7 @@ async def _fill_load_quantity_and_weight(page: Page, quantity: int, cargo_weight
     )
     if not ok or not ok.get("ok"):
         try:
-            await page.screenshot(path="debug_batch_load_dialog.png", full_page=False)
+            await page.screenshot(path=DEBUG_DIR / "debug_batch_load_dialog.png", full_page=False)
         except Exception:
             pass
         reason = ok.get("reason") if isinstance(ok, dict) else "unknown"
