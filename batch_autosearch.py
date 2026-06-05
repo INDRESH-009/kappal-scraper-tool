@@ -794,8 +794,7 @@ async def _set_load_type_dialog(
     await trigger.click(force=True)
     await asyncio.sleep(0.4)
 
-    if not await _visible_text_exists(page, load_type):
-        await _select_dialog_dropdown_value(page, load_type)
+    await _select_load_type_in_dialog(page, load_type)
     await _fill_load_quantity_and_weight(page, quantity, cargo_weight)
     if weight_unit.upper() != "KG":
         await _select_dialog_dropdown_value(page, weight_unit)
@@ -812,6 +811,147 @@ async def _set_load_type_dialog(
             except Exception:
                 pass
             raise RuntimeError(f"Load type summary did not validate as {load_type} x{quantity}")
+
+
+async def _select_load_type_in_dialog(page: Page, load_type: str) -> None:
+    selected = await page.evaluate(
+        """
+        () => {
+            const visible = (el) => {
+                const rect = el.getBoundingClientRect();
+                const style = getComputedStyle(el);
+                return rect.width > 0 && rect.height > 0
+                    && style.display !== 'none'
+                    && style.visibility !== 'hidden';
+            };
+            const textOf = (el) => (el.innerText || el.textContent || '').trim();
+            const loadTypePattern = /^(?:20GP|40GP|40HC|45HC|20RE|40RE|40HR|20OT|40OT|20FR|40FR|40NR|20NR|45S|20TK|40TK|OTHR|53HC|20HC|20FX|40HC OT|40HC FR|RO-RO|BB)$/;
+            const dialogs = Array.from(document.querySelectorAll('div, md-card, md-dialog, section'))
+                .filter(el => {
+                    if (!visible(el)) return false;
+                    const text = textOf(el);
+                    return text.includes('Load Type')
+                        && text.includes('Quantity')
+                        && text.includes('Cargo Weight')
+                        && text.includes('Done');
+                })
+                .sort((a, b) => {
+                    const ar = a.getBoundingClientRect();
+                    const br = b.getBoundingClientRect();
+                    return (ar.width * ar.height) - (br.width * br.height);
+                });
+            const dialog = dialogs[0];
+            if (!dialog) return null;
+
+            const candidates = Array.from(dialog.querySelectorAll('button, md-select, [role="button"], div, span'))
+                .filter(el => {
+                    if (!visible(el)) return false;
+                    const rect = el.getBoundingClientRect();
+                    const text = textOf(el).replace(/\\s+/g, ' ');
+                    return loadTypePattern.test(text)
+                        && rect.width <= 260
+                        && rect.height <= 90;
+                })
+                .sort((a, b) => {
+                    const ar = a.getBoundingClientRect();
+                    const br = b.getBoundingClientRect();
+                    return ar.top - br.top || ar.left - br.left || (ar.width * ar.height) - (br.width * br.height);
+                });
+            return candidates[0] ? textOf(candidates[0]).replace(/\\s+/g, ' ') : null;
+        }
+        """
+    )
+    if selected == load_type:
+        return
+
+    opened = await page.evaluate(
+        """
+        () => {
+            const visible = (el) => {
+                const rect = el.getBoundingClientRect();
+                const style = getComputedStyle(el);
+                return rect.width > 0 && rect.height > 0
+                    && style.display !== 'none'
+                    && style.visibility !== 'hidden';
+            };
+            const textOf = (el) => (el.innerText || el.textContent || '').trim();
+            const loadTypePattern = /^(?:20GP|40GP|40HC|45HC|20RE|40RE|40HR|20OT|40OT|20FR|40FR|40NR|20NR|45S|20TK|40TK|OTHR|53HC|20HC|20FX|40HC OT|40HC FR|RO-RO|BB)$/;
+            const dialogs = Array.from(document.querySelectorAll('div, md-card, md-dialog, section'))
+                .filter(el => {
+                    if (!visible(el)) return false;
+                    const text = textOf(el);
+                    return text.includes('Load Type')
+                        && text.includes('Quantity')
+                        && text.includes('Cargo Weight')
+                        && text.includes('Done');
+                })
+                .sort((a, b) => {
+                    const ar = a.getBoundingClientRect();
+                    const br = b.getBoundingClientRect();
+                    return (ar.width * ar.height) - (br.width * br.height);
+                });
+            const dialog = dialogs[0];
+            if (!dialog) return {ok: false, reason: 'load dialog not found'};
+
+            const candidates = Array.from(dialog.querySelectorAll('button, md-select, [role="button"], div'))
+                .filter(el => {
+                    if (!visible(el)) return false;
+                    const rect = el.getBoundingClientRect();
+                    const text = textOf(el).replace(/\\s+/g, ' ');
+                    return loadTypePattern.test(text)
+                        && rect.width <= 260
+                        && rect.height <= 90;
+                })
+                .sort((a, b) => {
+                    const ar = a.getBoundingClientRect();
+                    const br = b.getBoundingClientRect();
+                    return ar.top - br.top || ar.left - br.left || (ar.width * ar.height) - (br.width * br.height);
+                });
+            const control = candidates[0];
+            if (!control) return {ok: false, reason: 'load type dropdown not found'};
+            control.click();
+            return {ok: true, text: textOf(control)};
+        }
+        """
+    )
+    if not opened or not opened.get("ok"):
+        reason = opened.get("reason") if isinstance(opened, dict) else "unknown"
+        raise RuntimeError(f"Could not open load type dropdown: {reason}")
+    await asyncio.sleep(0.25)
+
+    selected_option = await page.evaluate(
+        """
+        (loadType) => {
+            const visible = (el) => {
+                const rect = el.getBoundingClientRect();
+                const style = getComputedStyle(el);
+                return rect.width > 0 && rect.height > 0
+                    && style.display !== 'none'
+                    && style.visibility !== 'hidden';
+            };
+            const normalize = (text) => (text || '').replace(/\\s+/g, ' ').trim();
+            const options = Array.from(document.querySelectorAll('[role="option"], md-option, li, div'))
+                .filter(el => visible(el) && normalize(el.innerText || el.textContent) === loadType)
+                .sort((a, b) => {
+                    const ar = a.getBoundingClientRect();
+                    const br = b.getBoundingClientRect();
+                    return (ar.width * ar.height) - (br.width * br.height);
+                });
+            const option = options[0];
+            if (!option) return false;
+            option.click();
+            return true;
+        }
+        """,
+        load_type,
+    )
+    if not selected_option:
+        try:
+            await page.screenshot(path=DEBUG_DIR / "debug_batch_load_type_option.png", full_page=False)
+        except Exception:
+            pass
+        raise RuntimeError(f"Load type option {load_type} not found")
+    await asyncio.sleep(0.25)
 
 
 async def _set_locals_customs_dialog(
