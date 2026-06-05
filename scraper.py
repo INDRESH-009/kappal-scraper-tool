@@ -109,7 +109,10 @@ async def manual_search_and_scrape_kappal(
             count = await _get_result_count(result_target)
             await emit(f"📦 {count} rate card(s) visible now – scraping as more load ...")
             results = await _scrape_cards_as_they_load(
-                result_target, emit, max_cards=count if count > 0 else None
+                result_target,
+                emit,
+                quiet_seconds=20,
+                max_seconds=max(search_timeout, 240),
             )
 
             return {
