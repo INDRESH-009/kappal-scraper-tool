@@ -237,9 +237,14 @@ async def run_batch_autosearch(
                 try:
                     await _run_one_job(page, job, emit)
                     await emit(f"Row {job.input_row}: search submitted; locating results page")
-                    result_target = await _wait_for_results_in_context(ctx, page, 180, emit)
+                    result_target = await _wait_for_results_in_context(ctx, page, 300, emit)
                     await emit(f"Row {job.input_row}: results located; handing off to scraper")
-                    row_results = await scrape_current_results_page(result_target, emit)
+                    row_results = await scrape_current_results_page(
+                        result_target,
+                        emit,
+                        quiet_seconds=30,
+                        max_seconds=600,
+                    )
                     for result in row_results:
                         result["_batch_input_row"] = job.input_row
                         result["_batch_origin_code"] = job.origin_code
@@ -308,10 +313,10 @@ async def _run_one_job(page: Page, job: BatchSearchJob, emit: Callable[[str], An
 
 
 async def _return_to_search_page(page: Page) -> None:
-    if "/rates" not in page.url or re.search(r"/rates/(fcl|lcl|air|land)/", page.url, re.I):
-        await page.goto(RATES_URL, wait_until="domcontentloaded")
+    await page.goto(RATES_URL, wait_until="domcontentloaded")
     await _wait_for_app_idle(page)
     await page.wait_for_load_state("networkidle")
+    await asyncio.sleep(1)
 
 
 async def _reset_form(page: Page) -> None:
@@ -374,8 +379,11 @@ async def _find_port_field(page: Page, section: str) -> Locator:
     )
     for selector in selectors:
         locator = page.locator(selector).first
-        if await locator.count() > 0 and await locator.is_visible():
+        try:
+            await locator.wait_for(state="visible", timeout=10_000)
             return locator
+        except Exception:
+            pass
 
     label = "Origin" if section == "origin" else "Destination"
     field = page.locator(
