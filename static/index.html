@@ -1757,13 +1757,28 @@ function downloadJSON() {
 
 async function downloadExcel() {
   if (!lastResult) return;
-  const response = await fetch('/export/excel', {
-    method: 'POST',
-    headers: authHeaders(),
-    body: JSON.stringify(authPayload(lastResult))
-  });
+  const requestExport = () => fetch('/export/excel', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify(authPayload(lastResult))
+    });
+  let response = await requestExport();
+  if (response.status === 401 && authSession?.refresh_token) {
+    try {
+      await refreshSession();
+      response = await requestExport();
+    } catch (error) {
+      log(`Excel export failed: ${error.message || 'session refresh failed.'}`, 'err');
+      return;
+    }
+  }
   if (!response.ok) {
-    log('Excel export failed.', 'err');
+    let message = `HTTP ${response.status}`;
+    try {
+      const data = await response.json();
+      message = data.error || data.detail || data.message || message;
+    } catch {}
+    log(`Excel export failed: ${message}`, 'err');
     return;
   }
   downloadBlob(await response.blob(), `kappal_rates_${new Date().toISOString().slice(0,10)}.xlsx`);

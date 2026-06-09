@@ -82,6 +82,7 @@ def _auth_header(token: str | None = None) -> dict[str, str]:
     }
 
 
+
 def _supabase_request_sync(
     method: str,
     path: str,
@@ -129,7 +130,6 @@ def _bearer_token(value: str | None) -> str | None:
     if len(parts) == 2 and parts[0].lower() == "bearer":
         return parts[1].strip()
     return None
-
 
 def _iso_expired(value: str | None) -> bool:
     if not value:
@@ -304,10 +304,13 @@ async def export_excel(request: Request, payload: dict):
         await _require_http_license(request, payload)
     except LicenseError as exc:
         return JSONResponse({"error": str(exc)}, status_code=401)
-    workbook = build_rates_workbook(payload)
-    output = BytesIO()
-    workbook.save(output)
-    output.seek(0)
+    try:
+        workbook = build_rates_workbook(payload)
+        output = BytesIO()
+        workbook.save(output)
+        output.seek(0)
+    except Exception as exc:
+        return JSONResponse({"error": f"Excel export failed: {exc}"}, status_code=500)
     filename = "kappal_rates.xlsx"
     return StreamingResponse(
         output,
@@ -591,8 +594,7 @@ def _rate_to_template_row(rate: dict) -> list:
     # ── FC1–FC6 (30 cols) ─────────────────────────────────────────────────────
     for i in range(6):
         row.extend(_charge_cols(freight_items, i))
-
-    # ── OC1–OC9 (45 cols) ────────────────────────────────────────────────────
+    # ── OC1–OC9 (45 cols)────────────────────────────────────────────────────
     for i in range(9):
         row.extend(_charge_cols(origin_items, i))
 
@@ -964,8 +966,8 @@ async def ws_scrape(ws: WebSocket):
             destination_service_mode=req.destination_service_mode,
             origin_carrier_sd=req.origin_carrier_sd,
             destination_carrier_sd=req.destination_carrier_sd,
-            include_nearby_origin=req.include_nearby_origin,
-            include_nearby_destination=req.include_nearby_destination,
+            include_nearby_origin=False,
+            include_nearby_destination=False,
             charges=req.charges,
             search_reference_name=req.search_reference_name,
             search_currency=req.search_currency,

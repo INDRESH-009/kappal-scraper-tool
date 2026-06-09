@@ -169,12 +169,12 @@ def parse_batch_workbook(path: str | Path) -> list[BatchSearchJob]:
                 origin_name=_required_text(raw, "Origin Port Name"),
                 origin_mode=_mode(raw.get("Origin Mode")),
                 origin_carrier_sd=_bool(raw.get("Origin Carrier SD")),
-                origin_include_nearby=_bool(raw.get("Origin Include Nearby")),
+                origin_include_nearby=False,
                 destination_code=_required_text(raw, "Destination Port Code").upper(),
                 destination_name=_required_text(raw, "Destination Port Name"),
                 destination_mode=_mode(raw.get("Destination Mode")),
                 destination_carrier_sd=_bool(raw.get("Destination Carrier SD")),
-                destination_include_nearby=_bool(raw.get("Destination Include Nearby")),
+                destination_include_nearby=False,
                 cut_off_date=_date_text(raw.get("Cut Off Date")),
                 load_type=_required_text(raw, "Load Type").upper(),
                 quantity=int(raw.get("Quantity") or 1),
@@ -289,9 +289,9 @@ async def _run_one_job(page: Page, job: BatchSearchJob, emit: Callable[[str], An
     await _set_service_mode(page, "origin", job.origin_mode, emit)
     await _set_service_mode(page, "destination", job.destination_mode, emit)
     await _set_section_checkbox(page, "origin", "Carrier SD Services", job.origin_carrier_sd, emit)
-    await _set_section_checkbox(page, "origin", "Include Nearby", job.origin_include_nearby, emit)
+    await _set_section_checkbox(page, "origin", "Include Nearby", False, emit)
     await _set_section_checkbox(page, "destination", "Carrier SD Services", job.destination_carrier_sd, emit)
-    await _set_section_checkbox(page, "destination", "Include Nearby", job.destination_include_nearby, emit)
+    await _set_section_checkbox(page, "destination", "Include Nearby", False, emit)
 
     await emit(f"Row {job.input_row}: selecting origin {job.origin_code}")
     await _select_port_exact(page, "origin", job.origin_name, job.origin_code)
@@ -533,25 +533,77 @@ async def _select_cutoff_date_from_picker(page: Page, date_text: str) -> None:
 
     await _open_cutoff_date_picker(page)
 
+    wanted_month = target.strftime("%b %Y")
+    long_month = target.strftime("%B %Y")
     for _ in range(24):
-        wanted_month = target.strftime("%b %Y")
-        long_month = target.strftime("%B %Y")
-        picker_text = await _open_date_picker_text(page)
-        if wanted_month in picker_text or long_month in picker_text:
+        month_ready = await page.evaluate(
+            """
+            ({wantedMonth, longMonth}) => {
+                const visible = (el) => {
+                    const rect = el.getBoundingClientRect();
+                    const style = getComputedStyle(el);
+                    return rect.width > 0 && rect.height > 0
+                        && style.display !== 'none'
+                        && style.visibility !== 'hidden';
+                };
+                const exactText = (el) => (el.innerText || el.textContent || '').trim();
+                const roots = Array.from(document.querySelectorAll(
+                    '.md-datepicker-calendar-pane, .md-calendar, md-calendar, [role="dialog"]'
+                )).filter(visible);
+                const scope = roots.length ? roots : [document.body];
+                const headers = scope.flatMap(root => Array.from(root.querySelectorAll('*')))
+                    .filter(el => {
+                        const text = exactText(el);
+                        return text === wantedMonth || text === longMonth;
+                    });
+                const header = headers.sort((a, b) => {
+                    const ar = a.getBoundingClientRect();
+                    const br = b.getBoundingClientRect();
+                    return ar.top - br.top || ar.left - br.left;
+                })[0];
+                if (!header) return false;
+                header.scrollIntoView({block: 'start', inline: 'nearest'});
+                return true;
+            }
+            """,
+            {"wantedMonth": wanted_month, "longMonth": long_month},
+        )
+        if month_ready:
+            await asyncio.sleep(0.4)
             break
-        next_button = page.locator(
-            ".md-datepicker-calendar-pane button[aria-label*='Next' i], "
-            ".md-calendar button[aria-label*='Next' i], .md-datepicker-next, "
-            "button:has-text('›'), button:has-text('>')"
-        ).first
-        if await next_button.count() == 0:
-            raise RuntimeError(f"Could not navigate date picker to {wanted_month}")
-        await next_button.click(force=True)
-        await asyncio.sleep(0.2)
+        scrolled = await page.evaluate(
+            """
+            () => {
+                const visible = (el) => {
+                    const rect = el.getBoundingClientRect();
+                    const style = getComputedStyle(el);
+                    return rect.width > 0 && rect.height > 0
+                        && style.display !== 'none'
+                        && style.visibility !== 'hidden';
+                };
+                const roots = Array.from(document.querySelectorAll(
+                    '.md-datepicker-calendar-pane, .md-calendar, md-calendar, [role="dialog"]'
+                )).filter(visible);
+                const root = roots[0];
+                if (!root) return false;
+                const scrollable = [root, ...Array.from(root.querySelectorAll('*'))]
+                    .find(el => el.scrollHeight > el.clientHeight + 20);
+                if (!scrollable) return false;
+                scrollable.scrollTop += Math.max(240, scrollable.clientHeight * 0.75);
+                scrollable.dispatchEvent(new Event('scroll', {bubbles: true}));
+                return true;
+            }
+            """
+        )
+        if not scrolled:
+            raise RuntimeError(f"Could not scroll date picker to {wanted_month}")
+        await asyncio.sleep(0.3)
+    else:
+        raise RuntimeError(f"Could not navigate date picker to {wanted_month}")
 
     clicked = await page.evaluate(
         """
-        (day) => {
+        ({day, wantedMonth, longMonth}) => {
             const visible = (el) => {
                 const rect = el.getBoundingClientRect();
                 const style = getComputedStyle(el);
@@ -560,93 +612,66 @@ async def _select_cutoff_date_from_picker(page: Page, date_text: str) -> None:
                     && style.visibility !== 'hidden';
             };
             const roots = Array.from(document.querySelectorAll(
-                '.md-datepicker-calendar-pane, .md-calendar, md-calendar, [role="dialog"], .md-datepicker-input-mask-opaque'
+                '.md-datepicker-calendar-pane, .md-calendar, md-calendar, [role="dialog"]'
             )).filter(visible);
             const scope = roots.length ? roots : [document.body];
-            const candidates = scope.flatMap(root => Array.from(root.querySelectorAll(
-                'button, td, [role="gridcell"], .md-calendar-date, .md-calendar-date-selection-indicator'
-            ))).filter(el => visible(el) && (el.innerText || el.textContent || '').trim() === String(day));
+            const exactText = (el) => (el.innerText || el.textContent || '').trim();
+            const rawMonthHeaders = scope.flatMap(root => Array.from(root.querySelectorAll('*')))
+                .filter(el => {
+                    const text = exactText(el);
+                    return visible(el) && /\\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s+\\d{4}\\b/.test(text);
+                })
+                .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+            const monthHeaders = rawMonthHeaders.filter((el, index) => {
+                const rect = el.getBoundingClientRect();
+                return !rawMonthHeaders.slice(0, index).some(previous => {
+                    const previousRect = previous.getBoundingClientRect();
+                    return Math.abs(previousRect.top - rect.top) < 4;
+                });
+            });
+            const targetHeader = monthHeaders.find(el => {
+                const text = exactText(el);
+                return text === wantedMonth || text === longMonth;
+            });
+            if (!targetHeader) return false;
+            const headerIndex = monthHeaders.indexOf(targetHeader);
+            const monthTop = targetHeader.getBoundingClientRect().bottom;
+            const monthBottom = headerIndex >= 0 && monthHeaders[headerIndex + 1]
+                ? monthHeaders[headerIndex + 1].getBoundingClientRect().top
+                : window.innerHeight;
+            const candidates = scope.flatMap(root => Array.from(root.querySelectorAll('*')))
+                .filter(el => visible(el) && exactText(el) === String(day))
+                .filter(el => !Array.from(el.children || []).some(child => visible(child) && exactText(child) === String(day)));
             const target = candidates
                 .filter(el => {
                     const rect = el.getBoundingClientRect();
-                    return rect.width <= 80 && rect.height <= 80;
+                    const centerY = rect.top + rect.height / 2;
+                    return rect.width >= 6 && rect.width <= 90
+                        && rect.height >= 6 && rect.height <= 90
+                        && centerY > monthTop
+                        && centerY < monthBottom;
                 })
-                .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top)[0];
+                .sort((a, b) => {
+                    const ar = a.getBoundingClientRect();
+                    const br = b.getBoundingClientRect();
+                    return ar.top - br.top || ar.left - br.left;
+                })[0];
             if (!target) return false;
-            target.click();
+            const clickable = target.closest('button, td, [role="button"], [role="gridcell"], .md-calendar-date')
+                || target;
+            clickable.scrollIntoView({block: 'center', inline: 'nearest'});
+            const rect = clickable.getBoundingClientRect();
+            const x = rect.left + rect.width / 2;
+            const y = rect.top + rect.height / 2;
+            const topElement = document.elementFromPoint(x, y) || clickable;
+            topElement.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, clientX: x, clientY: y}));
+            topElement.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, clientX: x, clientY: y}));
+            clickable.click();
             return true;
         }
         """,
-        target.day,
+        {"day": target.day, "wantedMonth": wanted_month, "longMonth": long_month},
     )
-    if not clicked:
-        clicked = await page.evaluate(
-            """
-            (day) => {
-                const wanted = String(day);
-                const visible = (el) => {
-                    const rect = el.getBoundingClientRect();
-                    const style = getComputedStyle(el);
-                    return rect.width > 0 && rect.height > 0
-                        && style.display !== 'none'
-                        && style.visibility !== 'hidden'
-                        && Number(style.opacity || 1) > 0;
-                };
-                const exactText = (el) => (el.innerText || el.textContent || '').trim();
-                const disabled = (el) => {
-                    const aria = (el.getAttribute('aria-disabled') || '').toLowerCase();
-                    return aria === 'true'
-                        || el.disabled
-                        || el.className.toString().toLowerCase().includes('disabled');
-                };
-                const roots = Array.from(document.querySelectorAll(
-                    '.md-datepicker-calendar-pane, .md-calendar, md-calendar, [role="dialog"]'
-                )).filter(visible);
-                const scope = roots.length ? roots : [document.body];
-                const monthHeaders = scope.flatMap(root => Array.from(root.querySelectorAll('*')))
-                    .filter(el => visible(el) && /\\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s+\\d{4}\\b/.test(exactText(el)))
-                    .map(el => el.getBoundingClientRect())
-                    .sort((a, b) => a.top - b.top);
-                const calendarTop = monthHeaders.length ? monthHeaders[0].top : 0;
-                const calendarBottom = monthHeaders.length > 1
-                    ? monthHeaders[1].top
-                    : window.innerHeight;
-
-                const candidates = scope.flatMap(root => Array.from(root.querySelectorAll('*')))
-                    .filter(el => visible(el) && !disabled(el) && exactText(el) === wanted)
-                    .filter(el => {
-                        const rect = el.getBoundingClientRect();
-                        const childHasSameText = Array.from(el.children || [])
-                            .some(child => visible(child) && exactText(child) === wanted);
-                        return !childHasSameText
-                            && rect.width >= 8
-                            && rect.height >= 8
-                            && rect.width <= 90
-                            && rect.height <= 90
-                            && rect.top > calendarTop
-                            && rect.top < calendarBottom;
-                    })
-                    .sort((a, b) => {
-                        const ar = a.getBoundingClientRect();
-                        const br = b.getBoundingClientRect();
-                        return ar.top - br.top || ar.left - br.left;
-                    });
-                const target = candidates[0];
-                if (!target) return false;
-                const clickable = target.closest('button, td, [role="button"], [role="gridcell"], .md-calendar-date')
-                    || target;
-                const rect = clickable.getBoundingClientRect();
-                const x = rect.left + rect.width / 2;
-                const y = rect.top + rect.height / 2;
-                const topElement = document.elementFromPoint(x, y);
-                (topElement || clickable).dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: x, clientY: y }));
-                (topElement || clickable).dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: x, clientY: y }));
-                (topElement || clickable).click();
-                return true;
-            }
-            """,
-            target.day,
-        )
     if not clicked:
         try:
             await page.screenshot(path=DEBUG_DIR / "debug_batch_date.png", full_page=False)

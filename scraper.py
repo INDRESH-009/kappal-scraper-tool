@@ -165,6 +165,8 @@ async def scrape_kappal(
     }
     progress_cb(msg) is called with human-readable status strings.
     """
+    include_nearby_origin = False
+    include_nearby_destination = False
 
     async def emit(msg: str):
         if progress_cb:
@@ -366,7 +368,7 @@ async def _fill_search_form(
     # ── Origin ────────────────────────────────────────────────────────────────
     await _set_service_mode(page, "origin", origin_service_mode, emit)
     await _set_section_checkbox(page, "origin", "Carrier SD Services", origin_carrier_sd, emit)
-    await _set_section_checkbox(page, "origin", "Include Nearby", include_nearby_origin, emit)
+    await _set_section_checkbox(page, "origin", "Include Nearby", False, emit)
     await log(f"✏️  Filling origin: '{origin}' …")
     if not await _kappal_port_fill(page, section="origin", query=origin, emit=emit):
         raise RuntimeError(
@@ -379,7 +381,7 @@ async def _fill_search_form(
     # ── Destination ───────────────────────────────────────────────────────────
     await _set_service_mode(page, "destination", destination_service_mode, emit)
     await _set_section_checkbox(page, "destination", "Carrier SD Services", destination_carrier_sd, emit)
-    await _set_section_checkbox(page, "destination", "Include Nearby", include_nearby_destination, emit)
+    await _set_section_checkbox(page, "destination", "Include Nearby", False, emit)
     await log(f"✏️  Filling destination: '{destination}' …")
     if not await _kappal_port_fill(page, section="destination", query=destination, emit=emit):
         raise RuntimeError(
@@ -1382,6 +1384,7 @@ async def _scrape_cards_as_they_load(
     last_growth_at = asyncio.get_event_loop().time()
     deadline = last_growth_at + max_seconds
     last_status_at = 0
+    zero_results_idle_since = None
 
     while asyncio.get_event_loop().time() < deadline:
         visible_count = await _available_card_count(page)
@@ -1403,6 +1406,15 @@ async def _scrape_cards_as_they_load(
             last_growth_at = now
             await emit(f"📦 {visible_count} rate card(s) available so far ...")
 
+        if reported_count == 0 and visible_count == 0 and loader_idle:
+            if zero_results_idle_since is None:
+                zero_results_idle_since = now
+            elif now - zero_results_idle_since >= min(quiet_seconds, 5):
+                await emit("✅ Loader finished with no rate cards; moving to the next search.")
+                return results
+        else:
+            zero_results_idle_since = None
+
         if index < visible_count:
             await emit(f"  ↳ Card {index + 1} / {visible_count}+ ...")
             results.append(await _scrape_one_card(page, index))
@@ -1410,10 +1422,11 @@ async def _scrape_cards_as_they_load(
             continue
 
         if index > 0 and now - last_growth_at >= quiet_seconds and loader_idle:
-            if max_cards is not None and index < max_cards:
+            expected_count = max(max_cards or 0, last_reported_count, reported_count)
+            if index < expected_count:
                 await emit(
-                    f"⏳ Kappal reported {max_cards} card(s); "
-                    f"waiting for remaining {max_cards - index} to become ready ..."
+                    f"⏳ Kappal reported {expected_count} card(s); "
+                    f"waiting for remaining {expected_count - index} to become ready ..."
                 )
                 last_growth_at = now
             else:
