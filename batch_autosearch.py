@@ -108,8 +108,6 @@ class BatchSearchJob:
     no_of_shipping_bill: int
     search_reference_name: str
     search_currency: str
-
-
 @dataclass
 class BatchSearchError:
     input_row: int

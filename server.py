@@ -240,7 +240,10 @@ async def root():
     index_path = STATIC_DIR / "index.html"
     if not index_path.exists():
         raise RuntimeError(f"Frontend file not found: {index_path}")
-    return index_path.read_text(encoding="utf-8")
+    return HTMLResponse(
+        index_path.read_text(encoding="utf-8"),
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
 
 
 @app.get("/health")
@@ -299,11 +302,7 @@ async def auth_refresh(payload: dict):
 
 
 @app.post("/export/excel")
-async def export_excel(request: Request, payload: dict):
-    try:
-        await _require_http_license(request, payload)
-    except LicenseError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=401)
+async def export_excel(payload: dict):
     try:
         workbook = build_rates_workbook(payload)
         output = BytesIO()
